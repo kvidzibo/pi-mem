@@ -43,7 +43,7 @@ function textKey(text: string): string {
   return createHash("sha256").update(text.normalize("NFKC").replace(/\s+/gu, " ").trim()).digest("hex");
 }
 
-function checkNew(input: NewLesson, limits: Readonly<MemoryLimits>): NewLesson {
+export function checkNew(input: NewLesson, limits: Readonly<MemoryLimits>): NewLesson {
   if (!["validated_fix", "user_request", "import"].includes(input.basis)) throw new Error("Invalid lesson basis");
   const checked = {
     text: checkedText(input.text, "text", MAX_TEXT),

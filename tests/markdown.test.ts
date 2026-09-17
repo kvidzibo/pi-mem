@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { exportMarkdown, exportPath, importMarkdown, parseMarkdown } from "../src/markdown.ts";
+import { exportMarkdown, exportPath, importMarkdown, parseMarkdown, readMarkdownSource, retireSource } from "../src/markdown.ts";
 import { MemoryStore } from "../src/store.ts";
 
 test("explicit Markdown migration is atomic, repeatable, confined, and preserves its source", (t) => {
@@ -31,6 +32,35 @@ test("explicit Markdown migration is atomic, repeatable, confined, and preserves
   symlinkSync("/etc/hosts", join(dir, "outside.md"));
   assert.throws(() => importMarkdown(db, dir, dir, "outside.md", origin), /inside the current project/);
   assert.throws(() => exportPath(dir, dir, "../outside.md"), /inside the current project/);
+});
+
+test("source replacement during removal is recovered without overwriting a newer writer", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-mem-remove-race-"));
+  const file = join(dir, "MEMORY.md");
+  const rename = fs.renameSync;
+  let thirdWriter = false;
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); rmSync(dir, { recursive: true, force: true }); });
+  t.mock.method(fs, "renameSync", (from: string, to: string) => {
+    // Replace the source after its final pre-move check, then optionally occupy the vacated path.
+    rename(from, join(dir, "writer-preserved-original.md"));
+    writeFileSync(from, "- Concurrent replacement.\n");
+    rename(from, to);
+    if (thirdWriter) writeFileSync(from, "- Newest writer.\n");
+  });
+  syncBuiltinESMExports();
+  for (thirdWriter of [false, true]) {
+    writeFileSync(file, "- Approved original.\n");
+    const source = readMarkdownSource(dir, dir, file);
+    const result = retireSource(dir, source);
+    assert.match(result.cleanupError!, /Source changed during removal/);
+    assert.equal(result.sourceRetained, true);
+    assert.equal(readFileSync(file, "utf8"), thirdWriter ? "- Newest writer.\n" : "- Concurrent replacement.\n");
+    assert.equal(readFileSync(result.movedSource!, "utf8"), "- Concurrent replacement.\n");
+    assert.equal(readFileSync(result.backup, "utf8"), "- Approved original.\n");
+    assert.equal(readFileSync(join(dir, "writer-preserved-original.md"), "utf8"), "- Approved original.\n");
+    writeFileSync(file, "- Subsequent edit.\n");
+    assert.equal(readFileSync(result.backup, "utf8"), "- Approved original.\n", "the reviewed backup must not share the live file's inode");
+  }
 });
 
 test("import rejects a named pipe without blocking the process", { skip: process.platform === "win32" }, (t) => {
