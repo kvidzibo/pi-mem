@@ -26,7 +26,10 @@ Example extension configuration, normally `~/.pi/agent/pi-mem.json`:
 
 ```json
 {
-  "databasePath": "~/.local/share/pi-mem/lessons.sqlite3"
+  "databasePath": "~/.local/share/pi-mem/lessons.sqlite3",
+  "maxLessonWords": 20,
+  "maxEvidenceWords": 20,
+  "maxRecallLessons": 30
 }
 ```
 
@@ -36,9 +39,17 @@ Or launch Pi with:
 PI_MEMORY_DB=/absolute/path/lessons.sqlite3 pi
 ```
 
-`~` expands to the home directory. Relative database paths resolve against the **Pi agent directory**, never the project cwd. `PI_CODING_AGENT_DIR` is respected. Project-local configuration cannot redirect the database. Empty paths and malformed configuration fail visibly rather than silently selecting another database. An explicit environment override takes precedence even if the config file is invalid.
+`~` expands to the home directory. Relative database paths resolve against the **Pi agent directory**, never the project cwd. `PI_CODING_AGENT_DIR` is respected. Project-local configuration cannot redirect the database. Empty paths and malformed configuration fail visibly rather than silently selecting another database. An explicit environment override still selects the database if the config file cannot be read, parsed or recognized; limits then use their defaults. Valid limit settings apply even with a database override. Invalid values for recognized limit settings fail visibly.
 
-Use `/memory reload` after changing the path. Changing paths selects a different store; it does not move or copy lessons. Use a local filesystem that supports SQLite WAL locking, not a concurrently accessed network share.
+Use `/memory reload` after changing settings. Changing paths selects a different store; it does not move or copy lessons. Use a local filesystem that supports SQLite WAL locking, not a concurrently accessed network share.
+
+## Lesson length
+
+`maxLessonWords` and `maxEvidenceWords` each default to **20** and accept positive safe integers in the same global `pi-mem.json`. Words are whitespace-separated tokens; punctuation and hyphenated terms without spaces count as one token. The existing character limits still apply.
+
+The model receives the current limits and guidance to save one actionable point, preferably one sentence, with a short verification statement and no background or filler. Limits are ceilings, not targets. Overlong tool saves, command saves and imports fail rather than silently truncating text; a failed import saves nothing. Raise the limits before importing longer legacy lessons if needed. Command evidence uses `User-requested.`; import evidence uses `sha256:<hash>` (the import report includes the source path), so both fit even a one-word evidence limit.
+
+Existing lessons remain readable, recallable and archivable after lowering a word limit. Saving or editing a lesson must satisfy the current limits.
 
 ## Scope and recall
 
@@ -50,7 +61,7 @@ Use `/memory reload` after changing the path. Changing paths selects a different
 
 At session start (including new/resumed/forked/reloaded sessions), the extension opens the database and loads the current scope. Before each model request it rereads committed lessons and injects one replaceable reference-data block. This survives compaction, reflects other sessions' writes, and does not append repeated memory messages to session history.
 
-Recall includes at most **30 active lessons and 8 KiB**, newest-updated first with stable ID tie-breaking. Older/excess lessons stay in SQLite and can be searched. The status indicator shows loaded/total counts. Archiving removes a lesson from future recall; it cannot erase text already present elsewhere in a conversation or previously sent to a model.
+`maxRecallLessons` controls the maximum number of active lessons injected, default **30**. It accepts positive safe integers, including values above 30, in the same global `pi-mem.json`. The **8 KiB** context cap still applies, so fewer lessons may fit. Recall streams newest-updated first with stable ID tie-breaking and stops at either limit; a large count does not load every lesson into memory. This setting does not change the 30-item list/search page limit. Older/excess lessons stay in SQLite and can be searched. The status indicator shows loaded/total counts. Archiving removes a lesson from future recall; it cannot erase text already present elsewhere in a conversation or previously sent to a model.
 
 Initialization failures are reported in the UI and model context without preventing Pi from running. `/memory reload` retries. Tool write failures are errors, never success messages.
 
@@ -90,7 +101,7 @@ Example save:
 ```
 
 - `add`/`update` require text, evidence, and `basis`: `validated_fix` or `user_request`.
-- Text is limited to 1,200 characters; evidence to 600. Control characters are rejected.
+- Lesson text and evidence each default to 20 words, configurable as above. Hard character caps remain 1,200 for text and 600 for evidence. Control characters are rejected.
 - Evidence records what the agent/user asserts was verified. The extension cannot independently prove the lesson or infer task authorization.
 - `update`/`archive`/`restore` require the current `revision`. A concurrent change fails rather than overwriting newer data; fetch the lesson again before retrying.
 - Whitespace/Unicode-normalized exact duplicates return their existing IDs. This is not semantic deduplication. Adding an archived duplicate does not restore it.
@@ -119,7 +130,8 @@ Import/export paths must be inside the current project after symlink resolution.
 
 - `src/store.ts`: harness-neutral schema, transactions, deduplication, revision checks.
 - `src/project.ts`: canonical flat project scope.
-- `src/config.ts`: configurable storage path, with the adapter supplying the config directory.
+- `src/config.ts`: storage path and limit configuration, with the adapter supplying the config directory.
+- `src/limits.ts`: shared defaults and validation for word limits and recall count.
 - `src/presentation.ts`: byte-bounded recall and result pagination.
 - `src/operations.ts`: harness-neutral tool operations.
 - `src/markdown.ts`: explicit import/export.
