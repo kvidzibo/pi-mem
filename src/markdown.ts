@@ -1,8 +1,27 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isInside } from "./project.ts";
-import { checkedText, MAX_TEXT, type MemoryStore, type Origin } from "./store.ts";
+import { checkedText, checkNew, MAX_TEXT, type MemoryStore, type Origin } from "./store.ts";
+import type { MemoryLimits } from "./limits.ts";
+
+export const MAX_IMPORT_BYTES = 1024 * 1024;
+export interface MarkdownSource {
+  path: string;
+  realpath: string;
+  text: string;
+  sha256: string;
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+export interface ImportPreview {
+  source: MarkdownSource;
+  markdown: string;
+  texts: string[];
+  sha256: string;
+}
 
 /** Deliberately strict: never silently discard prose during a migration. */
 export function parseMarkdown(markdown: string): string[] {
@@ -32,41 +51,113 @@ export function parseMarkdown(markdown: string): string[] {
   return items;
 }
 
-export function importMarkdown(store: MemoryStore, scope: string, cwd: string, file: string, origin: Origin) {
-  const source = realpathSync(resolve(cwd, file));
-  if (!isInside(scope, source)) throw new Error("Import source must be inside the current project");
+export function readMarkdownSource(scope: string, cwd: string, file: string): MarkdownSource {
+  const path = resolve(cwd, file);
+  const realpath = realpathSync(path);
+  if (!isInside(scope, realpath)) throw new Error("Import source must be inside the current project");
   // Nonblocking open lets fstat reject FIFOs/devices without freezing the Pi event loop.
-  const fd = openSync(source, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  const fd = openSync(realpath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
   let bytes: Buffer;
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error("Import requires a regular file no larger than 1 MiB");
-    const buffer = Buffer.alloc(1024 * 1024 + 1);
+    if (!stat.isFile() || stat.size > MAX_IMPORT_BYTES) throw new Error("Import requires a regular file no larger than 1 MiB");
+    const buffer = Buffer.alloc(MAX_IMPORT_BYTES + 1);
     let size = 0;
     while (size < buffer.length) {
       const count = readSync(fd, buffer, size, buffer.length - size, null);
       if (!count) break;
       size += count;
     }
-    if (size > 1024 * 1024) throw new Error("Import source grew beyond 1 MiB");
+    if (size > MAX_IMPORT_BYTES) throw new Error("Import source grew beyond 1 MiB");
     bytes = buffer.subarray(0, size);
+    const after = fstatSync(fd);
+    if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) {
+      throw new Error("Memory file changed while reading; retry");
+    }
+    return { path, realpath, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
   } finally {
     closeSync(fd);
   }
-  const texts = parseMarkdown(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  const hash = createHash("sha256").update(bytes).digest("hex");
+}
+
+export function assertSourceUnchanged(scope: string, source: MarkdownSource): void {
+  const now = readMarkdownSource(scope, scope, source.path);
+  if (now.realpath !== source.realpath || now.sha256 !== source.sha256 || now.dev !== source.dev || now.ino !== source.ino ||
+      now.mtimeMs !== source.mtimeMs || now.ctimeMs !== source.ctimeMs) {
+    throw new Error("Memory file changed since preview; nothing further changed. Run /memory import again");
+  }
+}
+
+export function prepareImport(source: MarkdownSource, markdown: string, limits: Readonly<MemoryLimits>): ImportPreview {
+  if (Buffer.byteLength(markdown) > MAX_IMPORT_BYTES) throw new Error("Import draft exceeds 1 MiB");
+  const texts = parseMarkdown(markdown).map((text) => checkNew({
+    text, evidence: `sha256:${source.sha256}`, basis: "import",
+  }, limits).text);
+  // Show exactly the text that will be stored, including whitespace normalization.
+  const normalized = "# Project memory\n\n" + texts.map((text) => "- " + text.replaceAll("\n", "\n  ")).join("\n") + "\n";
+  return { source, markdown: normalized, texts, sha256: createHash("sha256").update(normalized).digest("hex") };
+}
+
+function saveImport(store: MemoryStore, scope: string, source: MarkdownSource, texts: string[], origin: Origin) {
   const imported = store.addMany(scope, texts.map((text) => ({
-    text,
-    evidence: `sha256:${hash}`,
-    basis: "import" as const,
+    text, evidence: `sha256:${source.sha256}`, basis: "import" as const,
   })), origin);
   return {
-    source, sha256: hash, imported: imported.filter((item) => item.created).length,
+    source: source.path, sha256: source.sha256, imported: imported.filter((item) => item.created).length,
     existing: imported.filter((item) => !item.created).length,
     archived: imported.filter((item) => item.lesson.archived).length,
     ids: imported.map((item) => item.lesson.id),
     sourceRetained: true,
   };
+}
+
+export function commitImport(store: MemoryStore, scope: string, preview: ImportPreview, origin: Origin) {
+  // Save the approved immutable snapshot. This detects stale sources, not an atomic filesystem/SQLite transaction.
+  assertSourceUnchanged(scope, preview.source);
+  return { ...saveImport(store, scope, preview.source, preview.texts, origin), draftSha256: preview.sha256 };
+}
+
+/** Low-level noninteractive API; the Pi command adds the review/approval boundary. */
+export function importMarkdown(store: MemoryStore, scope: string, cwd: string, file: string, origin: Origin) {
+  const source = readMarkdownSource(scope, cwd, file);
+  return saveImport(store, scope, source, parseMarkdown(source.text), origin);
+}
+
+export interface SourceRetirement { backup: string; movedSource?: string; sourceRetained: boolean; cleanupError?: string }
+
+/** Keep every moved byte recoverable; detect replacement races and restore without overwriting newer data. */
+export function retireSource(scope: string, source: MarkdownSource): SourceRetirement {
+  assertSourceUnchanged(scope, source);
+  if (lstatSync(source.path).isSymbolicLink()) throw new Error("Source is a symlink; retained for manual cleanup");
+  const directory = mkdtempSync(join(dirname(source.realpath), ".pi-mem-backup-"));
+  const backup = join(directory, "reviewed-original.md");
+  const movedSource = join(directory, "moved-source");
+  // An independent snapshot survives even a writer holding the original file descriptor open across rename.
+  writeFileSync(backup, source.text, { flag: "wx", mode: 0o600 });
+  let movedFile = false;
+  try {
+    // A private, same-filesystem destination makes this an atomic, non-destructive move.
+    assertSourceUnchanged(scope, source);
+    renameSync(source.path, movedSource);
+    movedFile = true;
+    const moved = readMarkdownSource(scope, scope, movedSource);
+    // Renaming changes ctime, so compare identity, content and mtime instead.
+    if (moved.dev !== source.dev || moved.ino !== source.ino || moved.sha256 !== source.sha256 || moved.mtimeMs !== source.mtimeMs) {
+      throw new Error("Source changed during removal");
+    }
+  } catch (error) {
+    let restored = false;
+    if (movedFile) {
+      try { linkSync(movedSource, source.path); restored = true; } catch { /* Never overwrite another writer's new path. */ }
+    }
+    return { backup, ...(movedFile ? { movedSource } : {}), sourceRetained: restored || existsSync(source.path),
+      cleanupError: `${error instanceof Error ? error.message : String(error)}. ` +
+        `${!movedFile ? "Source not moved" : restored ? "Moved file restored at source" : "Could not restore without overwriting or violating filesystem constraints"}; ` +
+        `recovery files remain in ${JSON.stringify(directory)}. Inspect them before further cleanup.` };
+  }
+  return { backup, movedSource, sourceRetained: false };
 }
 
 export function exportPath(scope: string, cwd: string, file: string): string {

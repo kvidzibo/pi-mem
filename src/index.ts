@@ -3,7 +3,9 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
 import type { MemoryLimits } from "./limits.ts";
-import { exportMarkdown, exportPath, importMarkdown } from "./markdown.ts";
+import { exportMarkdown, exportPath } from "./markdown.ts";
+import { reviewedImport } from "./import-review.ts";
+import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, runMemory, type MemoryRequest } from "./operations.ts";
 import { clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
 import { projectScope } from "./project.ts";
@@ -15,7 +17,7 @@ const HELP = [
   "/memory — database, project and loaded lessons",
   "/memory list [offset] | archived [offset] | search <text> | get <id>",
   "/memory add <lesson> | edit <id> <lesson> | archive <id> | restore <id>",
-  "/memory import <path> — atomic bullet-list import; source is retained",
+  "/memory import [path] — draft if needed, review diff, approve import, then optionally remove source with backup",
   "/memory export <new-path> — active lesson text, no overwrite",
   "/memory reload — reconnect and reread database configuration",
 ].join("\n");
@@ -24,8 +26,15 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let state: { store: MemoryStore; path: string; scope: string; cwd: string; limits: Readonly<MemoryLimits> } | undefined;
   let failed: Error | undefined;
   let notified: string | undefined;
+  let legacyNotified: string | undefined;
+  let importing: AbortController | undefined;
+  let generation = 0;
 
   function reset() {
+    generation++;
+    importing?.abort(new Error("Session or memory configuration changed; import cancelled"));
+    importing = undefined;
+    legacyNotified = undefined;
     state?.store.close();
     state = undefined;
     failed = undefined;
@@ -70,7 +79,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. /memory reload retries.`, "warning");
     }
     notified = message;
-    return `Project memory unavailable: ${JSON.stringify(message)}. No lessons were loaded. /memory reload retries.`;
+    return `Project memory unavailable: ${JSON.stringify(message)}. No SQLite lessons were loaded. /memory reload retries.`;
   }
 
   function show(value: unknown, ctx: ExtensionContext) {
@@ -79,9 +88,32 @@ export default function memoryExtension(pi: ExtensionAPI) {
     else pi.sendMessage({ customType: "pi-mem-report", content: text, display: true });
   }
 
+  function recall(ctx: ExtensionContext): string {
+    const parts: string[] = [];
+    try { parts.push(snapshot(ctx).text); } catch (error) { parts.push(unavailable(error, ctx)); }
+    try {
+      // Legacy recall does not depend on a working SQLite configuration.
+      const scope = state?.cwd === ctx.cwd ? state.scope : projectScope(ctx.cwd);
+      const legacy = legacyContext(scope, ctx.cwd);
+      if (legacy.text) parts.push(legacy.text);
+      const noticeKey = legacy.warning + legacy.text;
+      if (legacy.warning && noticeKey !== legacyNotified) {
+        if (ctx.hasUI) ctx.ui.notify(legacy.warning, "warning");
+        else pi.sendMessage({ customType: "pi-mem-legacy-warning", content: legacy.warning, display: true }, { triggerTurn: false });
+      }
+      legacyNotified = noticeKey;
+    } catch (error) {
+      const warning = `Legacy memory unavailable: ${clipped(String(error instanceof Error ? error.message : error), 700)}`;
+      parts.push(warning);
+      if (warning !== legacyNotified && ctx.hasUI) ctx.ui.notify(warning, "warning");
+      legacyNotified = warning;
+    }
+    return parts.join("\n\n");
+  }
+
   pi.on("session_start", (_event, ctx) => {
     reset();
-    try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
+    recall(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
@@ -103,11 +135,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.on("context", (event, ctx) => {
-    // Rebuilt from SQLite every time: compaction and concurrent sessions cannot leave a stale snapshot.
+    // Rebuilt from SQLite and cwd's legacy file(s): no stale recall after compaction or external edits.
     const messages = event.messages.filter((message) => message.role !== "custom" || message.customType !== CONTEXT_TYPE);
-    let content: string;
-    try { content = snapshot(ctx).text; } catch (error) { content = unavailable(error, ctx); }
-    return { messages: [{ role: "custom" as const, customType: CONTEXT_TYPE, content, display: false, timestamp: 0 }, ...messages] };
+    return { messages: [{ role: "custom" as const, customType: CONTEXT_TYPE, content: recall(ctx), display: false, timestamp: 0 }, ...messages] };
   });
 
   pi.registerTool({
@@ -156,13 +186,34 @@ export default function memoryExtension(pi: ExtensionAPI) {
         const { store, path, scope } = current(ctx);
         const source = origin(ctx);
         if (!command || command === "reload") {
-          show(`Database: ${JSON.stringify(path)}\n${snapshot(ctx).text}`, ctx);
+          show(`Database: ${JSON.stringify(path)}\n${recall(ctx)}`, ctx);
           return;
         }
         if (command === "import") {
-          if (!rest) throw new Error("Usage: /memory import <path>");
-          const result = importMarkdown(store, scope, ctx.cwd, rest, source);
-          show(result, ctx);
+          if (importing) throw new Error("An import is already in progress; cancel it or use /memory reload");
+          const files = rest ? [rest] : legacyFiles(ctx.cwd);
+          if (files.length !== 1) throw new Error("Usage: /memory import <path> (select exactly one source)");
+          const controller = new AbortController();
+          importing = controller;
+          const started = generation;
+          const cwd = ctx.cwd;
+          const check = () => {
+            controller.signal.throwIfAborted();
+            if (generation !== started || state?.store !== store || state.scope !== scope || ctx.cwd !== cwd ||
+                ctx.sessionManager.getSessionId() !== source.session || projectScope(cwd) !== scope) {
+              throw new Error("Session or project changed; import cancelled");
+            }
+          };
+          try {
+            const result = await reviewedImport(ctx, { store, path, scope, cwd, limits: state!.limits,
+              file: files[0], origin: source, signal: controller.signal, check });
+            if (generation === started) {
+              // Imports require UI. Preserve the complete report, especially recovery paths after a large batch.
+              ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved or removed.", "info");
+            }
+          } finally {
+            if (importing === controller) importing = undefined;
+          }
         } else if (command === "export") {
           if (!rest) throw new Error("Usage: /memory export <new-path>");
           const output = exportPath(scope, ctx.cwd, rest);
