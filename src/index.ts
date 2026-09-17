@@ -17,7 +17,7 @@ const HELP = [
   "/memory — database, project and loaded lessons",
   "/memory list [offset] | archived [offset] | search <text> | get <id>",
   "/memory add <lesson> | edit <id> <lesson> | archive <id> | restore <id>",
-  "/memory import [path] — draft if needed, review diff, approve import; source always kept unchanged",
+  "/memory import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
   "/memory export <new-path> — active lesson text, no overwrite",
   "/memory reload — reconnect and reread database configuration",
 ].join("\n");
@@ -144,7 +144,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
     name: "memory",
     label: "Project memory",
     description: "SQLite lessons for this project only. list/search return paged results capped at 16 KiB; use nextOffset for more. " +
-      "add/update require text, evidence, and basis (validated_fix or user_request). Evidence describes the verification or explicit memory request. " +
+      "add/update require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
+      "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "update/archive/restore require id and the current revision from get/list. Exact duplicates are not added; archived duplicates stay archived. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
     promptSnippet: "Read and maintain SQLite project lessons",
@@ -154,7 +155,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       revision: Type.Optional(Type.Integer({ minimum: 1 })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
-      basis: Type.Optional(StringEnum(["validated_fix", "user_request"] as const)),
+      basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
       query: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
       state: Type.Optional(StringEnum(["active", "archived", "all"] as const)),
       offset: Type.Optional(Type.Integer({ minimum: 0 })),

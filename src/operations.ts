@@ -29,8 +29,8 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
       return store.get(scope, requireId(request));
     case "add":
     case "update": {
-      if (request.basis !== "validated_fix" && request.basis !== "user_request") {
-        throw new Error("add/update requires basis: validated_fix or user_request");
+      if (request.basis !== "validated_learning" && request.basis !== "validated_fix" && request.basis !== "user_request") {
+        throw new Error("add/update requires basis: validated_learning, validated_fix, or user_request");
       }
       const input = { text: request.text!, evidence: request.evidence!, basis: request.basis };
       if (request.action === "add") {

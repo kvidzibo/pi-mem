@@ -1,6 +1,6 @@
 # pi-mem
 
-SQLite-backed project lessons for Pi. Recall is automatic; saving is selective and agent-driven. Legacy `MEMORY.md` files in the current directory are recalled with a migration warning. Imports show a diff, require approval, and always keep the source file unchanged. No background model calls, embeddings, or transcript harvesting; only an explicitly requested import may call the selected model to prepare a shorter draft.
+SQLite-backed project lessons for Pi. Recall is automatic; saving is selective and agent-driven. Legacy `MEMORY.md` files in the current directory are recalled with a migration warning. Imports show a numbered Before/After preview, require approval, and always keep the source file unchanged. No background model calls, embeddings, or transcript harvesting; only an explicitly requested import may call the selected model to prepare a shorter draft.
 
 ## Setup
 
@@ -12,7 +12,7 @@ pi install git:github.com/kvidzibo/pi-mem
 
 For reproducible installs, append `@<tag-or-commit>` to the Git source. For a local checkout, use `pi install /absolute/path/to/pi-mem` instead. Load the package once, through `packages`, not also through `extensions`. Run `/reload` in existing Pi sessions afterward. Installing changes Pi settings, not your agent instruction files.
 
-Capture timing belongs to the agent's rules: after fixing a failed attempt, save one validated reusable lesson during an authorized workspace-write task, or save on an explicit user memory request. The package does not rewrite agent rules. An agent without that policy can still use the memory tool and commands, but selective automatic capture is not guaranteed.
+Capture timing belongs to the agent's rules. During authorized workspace-write tasks, save verified, non-obvious project lessons that avoid repeated investigation, or one validated reusable lesson after fixing a failed attempt. Explicit user memory requests also permit saves. Skip duplicates and leave memory maintenance to the user. The package does not rewrite agent rules. An agent without that policy can still use the memory tool and commands, but selective automatic capture is not guaranteed.
 
 ## Database path
 
@@ -86,7 +86,7 @@ Legacy text is untrusted reference data, not agent instructions. It is sent to t
 | `/memory edit <id> <lesson>` | Replace a lesson's text |
 | `/memory archive <id>` | Remove from recall without deleting |
 | `/memory restore <id>` | Reactivate an archived lesson |
-| `/memory import [path]` | Prepare draft, review diff, approve atomic import; always keep source unchanged |
+| `/memory import [path]` | Prepare draft, review Before/After preview, approve atomic import; always keep source unchanged |
 | `/memory export <new-path>` | Export active lesson text to a new Markdown file |
 | `/memory reload` | Reconnect and reread extension configuration |
 | `/memory help` | Command reference |
@@ -108,7 +108,7 @@ Example save:
 }
 ```
 
-- `add`/`update` require text, evidence, and `basis`: `validated_fix` or `user_request`.
+- `add`/`update` require text, evidence, and `basis`: `validated_learning` for verified discoveries, `validated_fix` for corrections after failed attempts, or `user_request` for explicit memory requests.
 - Lesson text and evidence each default to 20 words, configurable as above. Hard character caps remain 1,200 for text and 600 for evidence. Control characters are rejected.
 - Evidence records what the agent/user asserts was verified. The extension cannot independently prove the lesson or infer task authorization.
 - `update`/`archive`/`restore` require the current `revision`. A concurrent change fails rather than overwriting newer data; fetch the lesson again before retrying.
@@ -130,9 +130,9 @@ Detection and recall are automatic; **migration is not**. From the appropriate p
 With no path, `/memory import` selects the single legacy file in cwd. Paths remain literal (spaces work without shell quoting), and may also name other Markdown files inside the project.
 
 1. Read the source without changing it. If it already satisfies the Markdown format and current word limits, no model call is needed.
-2. Otherwise, use the **currently selected model** to normalize/shorten an in-memory draft. This is one explicit, cancellable request, limited to 64 KiB of source and two minutes; no background requests or automatic retries. With no model selected, a manual draft editor opens instead. Model failures, incomplete responses and invalid drafts save nothing. Review the wording: the model cannot guarantee that every important detail survives.
-3. Show the complete original-to-proposed diff, including the database and project destination. In the TUI, scroll with the configured selection arrows/page keys; Enter continues to approval, not to saving. RPC clients receive the complete diff through the editor dialog and must return it unchanged to continue. Control characters are displayed as escapes.
-4. Choose **Cancel**, **Edit draft**, or **Import N reviewed lessons**. Editing always returns to a fresh diff. Cancel is the default. No lessons are written until import is explicitly approved.
+2. Otherwise, use the **currently selected model** to normalize/shorten an in-memory draft. Validate it automatically; if invalid, send the same model the original source, latest draft and all numbered lesson-validation errors for **up to two correction passes** (three calls total). The whole drafting sequence is cancellable and shares a two-minute deadline. Source and correction-input drafts are each limited to 64 KiB; oversized invalid drafts need manual editing instead. There are no background requests or automatic retries of failed/incomplete model calls. The model is asked to shorten overlong lessons itself, keep valid lessons unchanged, and retain essential actions, commands, conditions and exceptions without splitting source items. With no model selected, a manual draft editor opens instead. For sources in the supported list format, code rejects any draft with a different lesson count, including manual edits; sources with more than 500 items need smaller files, not merged lessons. A draft still invalid after automatic correction offers **Cancel** or **Edit draft**, retaining the last rejected text. Manual edits do not restart automatic model calls. Model failures, incomplete responses and invalid drafts save nothing. Matching counts do not guarantee preserved meaning or order; review the wording.
+3. Show a numbered **Before/After preview**, including the source path, database and project destination. For lesson lists, the summary shows source and proposed counts. Each changed lesson places its complete original immediately above the proposed wording, with word counts; unchanged lessons appear once, labelled **Unchanged**. Titles, list markers and surrounding blank lines are not lesson text. For mixed prose or unsupported Markdown, no reliable lesson pairing is assumed: show the complete original source followed by every numbered proposal. In the TUI, scroll with the configured selection arrows/page keys; Enter continues to approval, not to saving. RPC clients receive the complete preview through the editor dialog and must return it unchanged to continue. Control characters are displayed as escapes. Draft editors also escape control characters and warn that edited escapes become literal text; they never render raw terminal commands from a rejected draft.
+4. Choose **Cancel**, **Edit draft**, or **Import N reviewed lessons**. Editing always returns through validation to a fresh preview. Cancel is the default. No lessons are written until import is explicitly approved.
 5. Commit the whole validated batch atomically. A pre-commit check rejects changed source content, identity or location; a session/project/configuration reload cancels pending work. This saves the **approved snapshot**, not later filesystem edits. Atomicity applies to SQLite, not a cross-process filesystem/database transaction; unrelated writers are not locked out. Reports include IDs and both the original-source and normalized-draft SHA-256 hashes. Import completion reports are not clipped, so all IDs remain visible even for 500 lessons. Exact duplicates are skipped; archived duplicates stay archived.
 
 **The source file is always kept unchanged.** Imports never move or delete it, offer no removal dialog, and create no source backups.
@@ -153,10 +153,10 @@ Import/export paths must be inside the current project after symlink resolution.
 - `src/operations.ts`: harness-neutral tool operations.
 - `src/markdown.ts`: bounded source snapshots, import validation/commit, export.
 - `src/legacy.ts`: cwd-only legacy discovery and bounded context.
-- `src/import-review.ts`: draft generation, diff viewer and import approval.
+- `src/import-review.ts`: boundary-preserving draft generation, Before/After viewer, manual repair and import approval.
 - `src/index.ts`: Pi lifecycle, tool and command adapter.
 
-Schema version 1 uses a `lessons` table with scope, text, evidence, capture basis, source harness/session, timestamps, revision and archive state. An application ID prevents accidentally initializing an unrelated database; unknown schema versions are rejected. WAL, a two-second busy timeout and immediate transactions support multiple local Pi processes. There is no daemon. Connections open only when a session starts or an operation needs them, and close on shutdown/reload.
+Schema version 2 uses a `lessons` table with scope, text, evidence, capture basis, source harness/session, timestamps, revision and archive state. Version 1 databases upgrade atomically on open to accept `validated_learning`, preserving existing lessons and metadata. Older pi-mem releases cannot open version 2; reload all Pi sessions after upgrading. An application ID prevents accidentally initializing an unrelated database; unknown schema versions are rejected. WAL, a two-second busy timeout and immediate transactions support multiple local Pi processes. There is no daemon. Connections open only when a session starts or an operation needs them, and close on shutdown/reload.
 
 Another harness can reuse the storage/operation modules and supply its own lifecycle/tool adapter. No other harness integration is included yet.
 
@@ -172,7 +172,7 @@ npm audit
 
 `npm test` runs strict TypeScript checking, core tests, and Pi integration tests. UI/protocol checks run under `xvfb-run`. CI repeats these checks on Node 22.19.0 and Node 24, with pinned GitHub Actions and read-only repository permissions.
 
-Tests use disposable databases/projects in the OS temporary directory, not the real memory store. Core tests cover persistence, duplicate/archive behavior, scope matching, concurrent processes and stale revisions, byte budgets, database-path selection, and migration safety. The loader smoke exercises Pi's real jiti loader and registered lifecycle handlers/tools with a test context, including legacy recall, a mocked shortening model, draft edits, explicit approval, stale-source/session rejection, source retention without cleanup dialogs or backups, and diff scrolling/remapped keys. The RPC smoke starts real, isolated, offline Pi processes and verifies command saves, new-session recall, process-restart persistence, project isolation, and the import review/approval protocol without inherited credentials or model calls. Neither test claims to validate live-model capture decisions or full interactive-terminal rendering.
+Tests use disposable databases/projects in the OS temporary directory, not the real memory store. Core tests cover persistence, duplicate/archive behavior, scope matching, concurrent processes and stale revisions, byte budgets, database-path selection, schema upgrades, and migration safety. The loader smoke exercises Pi's real jiti loader and registered lifecycle handlers/tools with a test context, including legacy recall, a mocked shortening model, bounded automatic corrections with numbered validation feedback, lesson-count checks, manual fallback, Before/After cards, explicit approval, stale-source/session rejection, source retention without cleanup dialogs or backups, and preview scrolling/remapped keys. The RPC smoke starts real, isolated, offline Pi processes and verifies command saves, new-session recall, process-restart persistence, project isolation, and the import review/approval protocol without inherited credentials or model calls. Neither test claims to validate live-model capture decisions or full interactive-terminal rendering.
 
 Local database files, credentials, runtime configuration, logs and workspace memory files are excluded from Git. The package's file allowlist includes only source and documentation.
 

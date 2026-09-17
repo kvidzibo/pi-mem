@@ -6,7 +6,7 @@ import { DEFAULT_LIMITS, memoryLimits, type MemoryLimits } from "./limits.ts";
 
 export const MAX_TEXT = 1200;
 export const MAX_EVIDENCE = 600;
-export type Basis = "validated_fix" | "user_request" | "import";
+export type Basis = "validated_learning" | "validated_fix" | "user_request" | "import";
 export type State = "active" | "archived" | "all";
 export interface Origin { harness: string; session: string | null }
 export interface Lesson {
@@ -27,7 +27,7 @@ export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export function checkedText(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) {
@@ -44,7 +44,7 @@ function textKey(text: string): string {
 }
 
 export function checkNew(input: NewLesson, limits: Readonly<MemoryLimits>): NewLesson {
-  if (!["validated_fix", "user_request", "import"].includes(input.basis)) throw new Error("Invalid lesson basis");
+  if (!["validated_learning", "validated_fix", "user_request", "import"].includes(input.basis)) throw new Error("Invalid lesson basis");
   const checked = {
     text: checkedText(input.text, "text", MAX_TEXT),
     evidence: checkedText(input.evidence, "evidence", MAX_EVIDENCE),
@@ -84,7 +84,9 @@ export class MemoryStore {
         const application = Number(this.db.prepare("PRAGMA application_id").get()!.application_id);
         const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
         const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all();
-        if (application === 0 && version === 0 && tables.length === 0) {
+        const upgrading = application === APPLICATION_ID && version === 1;
+        if ((application === 0 && version === 0 && tables.length === 0) || upgrading) {
+          if (upgrading) this.db.exec("ALTER TABLE lessons RENAME TO lessons_v1");
           this.db.exec(`
             CREATE TABLE lessons (
               id TEXT PRIMARY KEY,
@@ -92,7 +94,7 @@ export class MemoryStore {
               text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND ${MAX_TEXT}),
               text_key TEXT NOT NULL,
               evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND ${MAX_EVIDENCE}),
-              basis TEXT NOT NULL CHECK(basis IN ('validated_fix', 'user_request', 'import')),
+              basis TEXT NOT NULL CHECK(basis IN ('validated_learning', 'validated_fix', 'user_request', 'import')),
               source_harness TEXT NOT NULL,
               source_session TEXT,
               created_at INTEGER NOT NULL,
@@ -101,6 +103,15 @@ export class MemoryStore {
               archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
               UNIQUE(scope, text_key)
             );
+          `);
+          if (upgrading) this.db.exec(`
+            INSERT INTO lessons
+              (id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, revision, archived)
+            SELECT id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, revision, archived
+            FROM lessons_v1;
+            DROP TABLE lessons_v1;
+          `);
+          this.db.exec(`
             CREATE INDEX lessons_recall ON lessons(scope, archived, updated_at DESC, id);
             PRAGMA application_id = ${APPLICATION_ID};
             PRAGMA user_version = ${SCHEMA_VERSION};
