@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { databasePath } from "../src/config.ts";
+import { databasePath, memoryConfig } from "../src/config.ts";
+import { DEFAULT_LIMITS } from "../src/limits.ts";
+import { importMarkdown } from "../src/markdown.ts";
 import { runMemory } from "../src/operations.ts";
 import { CONTEXT_BYTES, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
 import { MemoryStore, type Page } from "../src/store.ts";
@@ -21,16 +23,78 @@ test("database path precedence is env, global extension config, then default; ba
   assert.throws(() => databasePath(dir, { PI_MEMORY_DB: "" }), /nonempty/);
 });
 
+test("word limits bound new writes and atomic imports without changing existing lessons", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-mem-words-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const defaults = memoryConfig(dir, {});
+  assert.equal(defaults.maxLessonWords, 20);
+  assert.equal(defaults.maxEvidenceWords, 20);
+  let db = new MemoryStore(defaults.databasePath);
+  t.after(() => db.close());
+  const origin = { harness: "test", session: null };
+  const text = Array.from({ length: 20 }, (_, i) => `word${i}`).join("\u2003\t\n");
+  const input = { text, evidence: text, basis: "user_request" as const };
+  const saved = db.add(dir, input, origin).lesson;
+  assert.throws(() => db.add(dir, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
+  assert.throws(() => db.add(dir, { ...input, evidence: text + " extra" }, origin), /evidence exceeds 20 words/);
+  assert.throws(() => db.update(dir, saved.id, saved.revision, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
+  assert.deepEqual(db.get(dir, saved.id), saved);
+  writeFileSync(join(dir, "lessons.md"), `- A valid new lesson.\n- ${text.replace(/\s+/gu, " ")} extra\n`);
+  assert.throws(() => importMarkdown(db, dir, dir, "lessons.md", origin), /text exceeds 20 words/);
+  assert.equal(db.list(dir).total, 1, "a rejected import must not partially save");
+  db.close();
+
+  writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxLessonWords: 21, maxEvidenceWords: 1 }));
+  const custom = memoryConfig(dir, { PI_MEMORY_DB: defaults.databasePath });
+  assert.equal(custom.maxLessonWords, 21, "a database override must not discard valid word settings");
+  db = new MemoryStore(custom.databasePath, custom);
+  const longer = db.add(dir, { ...input, text: text + " extra", evidence: "Verified." }, origin).lesson;
+  assert.throws(() => db.add(dir, { ...input, evidence: "Two words" }, origin), /evidence exceeds 1 words/);
+  db.close();
+  db = new MemoryStore(defaults.databasePath);
+  assert.deepEqual(db.get(dir, longer.id), longer, "lower limits must not rewrite or hide existing lessons");
+  assert.equal(db.setArchived(dir, longer.id, longer.revision, true).archived, true);
+  for (const maxLessonWords of [0, 1.5, "20", null]) {
+    writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxLessonWords }));
+    assert.throws(() => memoryConfig(dir, {}), /maxLessonWords must be a positive safe integer/);
+  }
+});
+
+test("recall count is configurable below and above 30 without changing list pagination", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-mem-count-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const defaults = memoryConfig(dir, {});
+  assert.equal(defaults.maxRecallLessons, 30);
+  let db = new MemoryStore(defaults.databasePath);
+  t.after(() => db.close());
+  db.addMany(dir, Array.from({ length: 31 }, (_, i) => ({
+    text: `Lesson ${i}.`, evidence: "Verified.", basis: "user_request" as const,
+  })), { harness: "test", session: null });
+  assert.equal(memoryContext(dir, db.recall(dir)).loaded, 30);
+  for (const maxRecallLessons of [2, 31]) {
+    db.close();
+    writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallLessons }));
+    const config = memoryConfig(dir, {});
+    db = new MemoryStore(config.databasePath, config);
+    const recalled = memoryContext(dir, db.recall(dir));
+    assert.equal(recalled.loaded, maxRecallLessons);
+    assert.equal(db.list(dir).lessons.length, 30);
+    assert.equal(db.list(dir).total, 31);
+  }
+  writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallLessons: 0 }));
+  assert.throws(() => memoryConfig(dir, {}), /maxRecallLessons must be a positive safe integer/);
+});
+
 test("recall and paged search stay byte-bounded without deleting excess lessons", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-recall-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const db = new MemoryStore(join(dir, "db.sqlite3"));
+  const db = new MemoryStore(join(dir, "db.sqlite3"), { ...DEFAULT_LIMITS, maxRecallLessons: 1000 });
   t.after(() => db.close());
   const origin = { harness: "test", session: null };
   db.addMany("/project", Array.from({ length: 31 }, (_, i) => ({
     text: `${i}: ${"记".repeat(1100)}`, evidence: "证".repeat(500), basis: "user_request" as const,
   })), origin);
-  const context = memoryContext("/project", db.list("/project"));
+  const context = memoryContext("/project", db.recall("/project"));
   assert.ok(Buffer.byteLength(context.text) <= CONTEXT_BYTES);
   assert.ok(context.loaded > 0 && context.loaded < 30);
   const ids = new Set<string>();
@@ -44,4 +108,6 @@ test("recall and paged search stay byte-bounded without deleting excess lessons"
   assert.equal(ids.size, 31);
   assert.equal(db.list("/project").total, 31);
   assert.throws(() => runMemory(db, "/project", { action: "add", text: "Missing evidence", basis: "validated_fix" }, origin), /evidence/);
+  assert.equal(db.add("/project", { text: "A later write succeeds.", evidence: "Verified.", basis: "user_request" }, origin).created, true,
+    "breaking recall at the byte budget must release its cursor before later writes");
 });

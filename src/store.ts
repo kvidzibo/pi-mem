@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { DEFAULT_LIMITS, memoryLimits, type MemoryLimits } from "./limits.ts";
 
 export const MAX_TEXT = 1200;
 export const MAX_EVIDENCE = 600;
@@ -22,7 +23,8 @@ export interface Lesson {
   archived: boolean;
 }
 export interface NewLesson { text: string; evidence: string; basis: Basis }
-export interface Page { lessons: Lesson[]; total: number; nextOffset: number | null }
+export interface RecallPage { lessons: Iterable<Lesson>; total: number }
+export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
 const SCHEMA_VERSION = 1;
@@ -41,13 +43,18 @@ function textKey(text: string): string {
   return createHash("sha256").update(text.normalize("NFKC").replace(/\s+/gu, " ").trim()).digest("hex");
 }
 
-function checkNew(input: NewLesson): NewLesson {
+function checkNew(input: NewLesson, limits: Readonly<MemoryLimits>): NewLesson {
   if (!["validated_fix", "user_request", "import"].includes(input.basis)) throw new Error("Invalid lesson basis");
-  return {
+  const checked = {
     text: checkedText(input.text, "text", MAX_TEXT),
     evidence: checkedText(input.evidence, "evidence", MAX_EVIDENCE),
     basis: input.basis,
   };
+  for (const [field, max] of [["text", limits.maxLessonWords], ["evidence", limits.maxEvidenceWords]] as const) {
+    const count = checked[field].split(/\s+/u).length;
+    if (count > max) throw new Error(`${field} exceeds ${max} words (${count} whitespace-separated words); shorten and retry`);
+  }
+  return checked;
 }
 
 function lesson(row: Record<string, unknown>): Lesson {
@@ -59,8 +66,10 @@ function lesson(row: Record<string, unknown>): Lesson {
 export class MemoryStore {
   private db: DatabaseSync;
   private closed = false;
+  private readonly limits: Readonly<MemoryLimits>;
 
-  constructor(path: string) {
+  constructor(path: string, limits: Readonly<MemoryLimits> = DEFAULT_LIMITS) {
+    this.limits = memoryLimits({ ...limits });
     if (!isAbsolute(path)) throw new Error("Memory database path must be absolute");
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     try {
@@ -161,6 +170,22 @@ export class MemoryStore {
     return { lessons, total, nextOffset: next < total ? next : null };
   }
 
+  recall(scope: string): RecallPage {
+    this.checkScope(scope);
+    const total = Number(this.db.prepare("SELECT count(*) AS n FROM lessons WHERE scope = ? AND archived = 0").get(scope)!.n);
+    const db = this.db;
+    const limit = this.limits.maxRecallLessons;
+    return {
+      total,
+      // Stream one ordered query; breaking at the byte budget closes the cursor without reading every lesson.
+      lessons: (function* () {
+        const rows = db.prepare("SELECT * FROM lessons WHERE scope = ? AND archived = 0 ORDER BY updated_at DESC, id LIMIT ?")
+          .iterate(scope, limit);
+        for (const row of rows) yield lesson(row);
+      })(),
+    };
+  }
+
   activeTexts(scope: string): string[] {
     this.checkScope(scope);
     // A single SELECT is a consistent snapshot even while other sessions write.
@@ -177,7 +202,7 @@ export class MemoryStore {
     this.checkScope(scope);
     this.checkOrigin(origin);
     if (inputs.length < 1 || inputs.length > 500) throw new Error("A batch must contain 1–500 lessons");
-    const checked = inputs.map(checkNew);
+    const checked = inputs.map((input) => checkNew(input, this.limits));
     return this.transaction(() => checked.map((input) => {
       const key = textKey(input.text);
       const existing = this.db.prepare("SELECT * FROM lessons WHERE scope = ? AND text_key = ?").get(scope, key);
@@ -194,7 +219,7 @@ export class MemoryStore {
   }
 
   update(scope: string, id: string, revision: number, input: NewLesson, origin: Origin): Lesson {
-    const checked = checkNew(input);
+    const checked = checkNew(input, this.limits);
     this.checkOrigin(origin);
     return this.transaction(() => {
       const current = this.checkRevision(scope, id, revision);

@@ -1,4 +1,4 @@
-import type { Lesson, Page } from "./store.ts";
+import type { Lesson, Page, RecallPage } from "./store.ts";
 
 export const CONTEXT_BYTES = 8192;
 export const RESULT_BYTES = 16384;
@@ -16,7 +16,7 @@ export function clipped(text: string, bytes: number): string {
 }
 
 /** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(scope: string, page: Page): { text: string; loaded: number } {
+export function memoryContext(scope: string, page: RecallPage): { text: string; loaded: number } {
   const rows: Array<Pick<Lesson, "id" | "revision" | "text" | "evidence">> = [];
   const render = () => [
     "Project memory (stored reference data)",

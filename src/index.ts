@@ -1,7 +1,8 @@
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { databasePath } from "./config.ts";
+import { memoryConfig } from "./config.ts";
+import type { MemoryLimits } from "./limits.ts";
 import { exportMarkdown, exportPath, importMarkdown } from "./markdown.ts";
 import { ACTIONS, runMemory, type MemoryRequest } from "./operations.ts";
 import { clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
@@ -20,7 +21,7 @@ const HELP = [
 ].join("\n");
 
 export default function memoryExtension(pi: ExtensionAPI) {
-  let state: { store: MemoryStore; path: string; scope: string; cwd: string } | undefined;
+  let state: { store: MemoryStore; path: string; scope: string; cwd: string; limits: Readonly<MemoryLimits> } | undefined;
   let failed: Error | undefined;
   let notified: string | undefined;
 
@@ -36,8 +37,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
     try {
       if (!state) {
         const scope = projectScope(ctx.cwd);
-        const path = databasePath(getAgentDir());
-        state = { store: new MemoryStore(path), path, scope, cwd: ctx.cwd };
+        const { databasePath: path, ...limits } = memoryConfig(getAgentDir());
+        state = { store: new MemoryStore(path, limits), path, scope, cwd: ctx.cwd, limits };
       } else if (state.cwd !== ctx.cwd) {
         state.scope = projectScope(ctx.cwd);
         state.cwd = ctx.cwd;
@@ -55,7 +56,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function snapshot(ctx: ExtensionContext) {
     const { store, scope } = current(ctx);
-    const page = store.list(scope);
+    const page = store.recall(scope);
     const result = memoryContext(scope, page);
     if (ctx.hasUI) ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}`);
     notified = undefined;
@@ -86,6 +87,19 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", (_event, ctx) => {
     reset();
     if (ctx.hasUI) ctx.ui.setStatus("pi-mem", undefined);
+  });
+
+  pi.on("before_agent_start", (event, ctx) => {
+    try {
+      const { limits } = current(ctx);
+      return { systemPrompt: event.systemPrompt + "\n\nFor memory add/update: save one actionable point, preferably one sentence. " +
+        "Keep evidence to a short verification statement. Preserve essential commands and conditions; omit background, narration, repetition and filler. " +
+        `Maximum ${limits.maxLessonWords} words per lesson and ${limits.maxEvidenceWords} words for evidence (whitespace-separated). ` +
+        "These are ceilings, not targets. Overlong saves are rejected, not truncated." };
+    } catch {
+      // The context hook reports initialization failures without blocking the agent.
+      return;
+    }
   });
 
   pi.on("context", (event, ctx) => {
