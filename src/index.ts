@@ -17,7 +17,7 @@ const HELP = [
   "/memory — database, project and loaded lessons",
   "/memory list [offset] | archived [offset] | search <text> | get <id>",
   "/memory add <lesson> | edit <id> <lesson> | archive <id> | restore <id>",
-  "/memory import [path] — draft if needed, review diff, approve import, then optionally remove source with backup",
+  "/memory import [path] — draft if needed, review diff, approve import; source always kept unchanged",
   "/memory export <new-path> — active lesson text, no overwrite",
   "/memory reload — reconnect and reread database configuration",
 ].join("\n");
@@ -208,8 +208,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
             const result = await reviewedImport(ctx, { store, path, scope, cwd, limits: state!.limits,
               file: files[0], origin: source, signal: controller.signal, check });
             if (generation === started) {
-              // Imports require UI. Preserve the complete report, especially recovery paths after a large batch.
-              ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved or removed.", "info");
+              // Imports require UI. Preserve all lesson IDs and hashes, even after a large batch.
+              ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved.", "info");
             }
           } finally {
             if (importing === controller) importing = undefined;

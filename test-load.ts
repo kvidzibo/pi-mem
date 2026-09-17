@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { tmpdir } from "node:os";
@@ -154,10 +154,8 @@ test("legacy recall and reviewed import preserve originals, require consent, and
   const notices: string[] = [];
   const diffs: string[] = [];
   let choice: "cancel" | "approve" | "edit" | "stale" | "reload" = "cancel";
-  let cleanup: "keep" | "remove" | "change" = "keep";
   let modelCalls = 0;
-  let removalOffers = 0;
-  let commitNoticeFails = false;
+  const unexpectedDialogs: string[] = [];
   let draft = "- Use nonblocking opens before file-type validation.\n- Preserve distinct lessons during import.\n";
   let extension: Awaited<ReturnType<typeof load>>;
   const ctx = {
@@ -170,10 +168,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     } },
     sessionManager: { getSessionId: () => "review-session", getSessionFile: () => "/temporary/session.jsonl" },
     ui: {
-      notify: (text: string) => {
-        if (commitNoticeFails && text.startsWith("Import committed")) { commitNoticeFails = false; throw new Error("Commit notification failed"); }
-        notices.push(text);
-      }, setStatus() {},
+      notify: (text: string) => notices.push(text), setStatus() {},
       editor: async (title: string, prefill: string) => {
         if (title.startsWith("Review")) { diffs.push(prefill); return prefill; }
         return "- Use nonblocking opens before file-type validation.\n- Keep historical lessons recoverable.\n";
@@ -187,10 +182,8 @@ test("legacy recall and reviewed import preserve originals, require consent, and
           if (choice === "reload") { await event("session_shutdown"); await event("session_start"); }
           return choices.at(-1);
         }
-        removalOffers++;
-        assert.equal(choices[0], "Keep source file");
-        if (cleanup === "change") writeFileSync(file, original + "- Changed after commit.\n");
-        return cleanup === "keep" ? choices[0] : choices.at(-1);
+        unexpectedDialogs.push(title);
+        return choices[0];
       },
       custom: async (_factory: any): Promise<any> => { throw new Error("unexpected custom UI"); },
     },
@@ -226,7 +219,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     assert.match(diffs.at(-1)!, /-- Open untrusted/);
     assert.match(diffs.at(-1)!, /\+- Use nonblocking/);
     assert.equal(observer.list(project).total, 0);
-    assert.equal(removalOffers, 0, "cancelled imports must not offer deletion");
+    assert.deepEqual(unexpectedDialogs, [], "cancelled imports must not open further dialogs");
     assert.equal(readFileSync(file, "utf8"), original);
 
     choice = "stale";
@@ -249,39 +242,27 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     let result = JSON.parse(notices.at(-1)!);
     assert.equal(result.imported, 2);
     assert.equal(result.sourceRetained, true);
+    assert.deepEqual(unexpectedDialogs, [], "approved imports must not offer source removal");
+    assert.equal(result.backup, undefined);
+    assert.equal(result.movedSource, undefined);
+    assert.equal(result.cleanupError, undefined);
     assert.match(diffs.at(-1)!, /Keep historical lessons recoverable/);
     assert.equal(readFileSync(file, "utf8"), original);
     assert.equal(observer.list(project).total, 2);
 
     draft = "- Use nonblocking opens before file-type validation.\n- Keep historical lessons recoverable.\n";
-    commitNoticeFails = true;
-    await command.handler("import", ctx);
-    result = JSON.parse(notices.at(-1)!);
-    assert.equal(result.existing, 2);
-    assert.equal(result.sourceRetained, true);
-    assert.match(result.cleanupError, /Commit notification failed/);
-    cleanup = "change";
     await command.handler("import", ctx);
     result = JSON.parse(notices.at(-1)!);
     assert.equal(result.imported, 0);
     assert.equal(result.existing, 2);
-    assert.match(result.cleanupError, /changed since preview/);
     assert.equal(result.sourceRetained, true);
-    assert.match(readFileSync(file, "utf8"), /Changed after commit/);
-    writeFileSync(file, original);
-    cleanup = "remove";
-    await command.handler("import", ctx);
-    result = JSON.parse(notices.at(-1)!);
-    assert.equal(result.sourceRetained, false);
-    assert.equal(existsSync(file), false);
-    assert.equal(readFileSync(result.backup, "utf8"), original);
-    assert.equal(statSync(dirname(result.backup)).mode & 0o777, 0o700);
-    assert.deepEqual(execFileSync("git", ["-C", project, "check-ignore", result.backup, result.movedSource], { encoding: "utf8" }).trim().split("\n"),
-      [result.backup, result.movedSource], "private recovery files must also be excluded from ordinary Git staging");
-    assert.doesNotMatch(execFileSync("git", ["-C", project, "ls-files", "--others", "--exclude-standard"], { encoding: "utf8" }), /\.pi-mem-backup-/);
+    assert.equal(readFileSync(file, "utf8"), original, "repeat imports must also preserve the source");
+    assert.deepEqual(unexpectedDialogs, []);
+    assert.deepEqual(readdirSync(project).filter((name) => name.startsWith(".pi-mem-backup-")), [], "imports must not create source backups");
     recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /Keep historical lessons recoverable/);
-    assert.doesNotMatch(recall.messages[0].content, /Legacy Markdown memory/);
+    assert.match(recall.messages[0].content, /Legacy Markdown memory/);
+    assert.match(recall.messages[0].content, /historical details/);
 
     writeFileSync(file, "- A new lesson.\n- Render invisible \u200echaracters.\n");
     ctx.hasUI = false;
@@ -332,9 +313,10 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     result = JSON.parse(notices.at(-1)!);
     assert.equal(result.ids.length, 500);
     assert.equal(result.imported, 500);
-    assert.equal(result.sourceRetained, false);
-    assert.equal(readFileSync(result.backup, "utf8"), bulk, "backup paths must survive large result reports");
-    assert.equal(readFileSync(result.movedSource, "utf8"), bulk);
+    assert.equal(result.sourceRetained, true);
+    assert.equal(readFileSync(file, "utf8"), bulk, "large imports must preserve the source too");
+    assert.deepEqual(unexpectedDialogs, []);
+    assert.deepEqual(readdirSync(project).filter((name) => name.startsWith(".pi-mem-backup-")), []);
     assert.equal(observer.list(project).total, 502);
   } finally {
     await event("session_shutdown");

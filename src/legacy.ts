@@ -66,6 +66,6 @@ export function legacyContext(scope: string, cwd: string): { text: string; warni
     warning: `Legacy memory ${files.length ? "found in cwd: " + files.slice(0, LEGACY_READ_FILES).map((file) => JSON.stringify(file)).join(", ") : "scan incomplete"}. ` +
       `${problems.length ? "Some content could not be loaded" : "Loaded into model context"}${truncated ? " (truncated at 32 KiB)" : ""}. ` +
       `Run ${commands} to review a diff and approve import. Shortening uses the selected model when needed. ` +
-      "Saving and source removal need separate approvals." + (problems.length ? `\n${problems.join("\n")}` : ""),
+      "Source files are always kept unchanged." + (problems.length ? `\n${problems.join("\n")}` : ""),
   };
 }
