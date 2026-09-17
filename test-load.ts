@@ -112,6 +112,16 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
     assert.match((await event("context", { messages: [user] })).messages[0].content, /1 of 3 active lessons loaded/);
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
+    await command.handler("reload", ctx);
+    await command.handler("add Compact evidence works.", ctx);
+    assert.match(notices.at(-1)!, /"status": "saved"/, "command evidence must fit the smallest supported limit");
+    const compact = JSON.parse(notices.at(-1)!);
+    await command.handler(`edit ${compact.id} Compact edits work.`, ctx);
+    assert.match(notices.at(-1)!, /"status": "updated"/);
+    writeFileSync(join(ctx.cwd, "low evidence.md"), "- Compact imports work.\n");
+    await command.handler("import low evidence.md", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).imported, 1, "generated import evidence must fit even when the filename contains spaces");
   } finally {
     await event("session_shutdown", { reason: "quit" });
     for (const [key, value] of Object.entries(previous)) {

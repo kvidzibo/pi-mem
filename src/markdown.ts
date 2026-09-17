@@ -57,7 +57,7 @@ export function importMarkdown(store: MemoryStore, scope: string, cwd: string, f
   const hash = createHash("sha256").update(bytes).digest("hex");
   const imported = store.addMany(scope, texts.map((text) => ({
     text,
-    evidence: `Imported from ${basename(source)}; sha256:${hash}`,
+    evidence: `sha256:${hash}`,
     basis: "import" as const,
   })), origin);
   return {

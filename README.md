@@ -47,7 +47,7 @@ Use `/memory reload` after changing settings. Changing paths selects a different
 
 `maxLessonWords` and `maxEvidenceWords` each default to **20** and accept positive safe integers in the same global `pi-mem.json`. Words are whitespace-separated tokens; punctuation and hyphenated terms without spaces count as one token. The existing character limits still apply.
 
-The model receives the current limits and guidance to save one actionable point, preferably one sentence, with a short verification statement and no background or filler. Limits are ceilings, not targets. Overlong tool saves, command saves and imports fail rather than silently truncating text; a failed import saves nothing. Raise the limits before importing longer legacy lessons if needed.
+The model receives the current limits and guidance to save one actionable point, preferably one sentence, with a short verification statement and no background or filler. Limits are ceilings, not targets. Overlong tool saves, command saves and imports fail rather than silently truncating text; a failed import saves nothing. Raise the limits before importing longer legacy lessons if needed. Command evidence uses `User-requested.`; import evidence uses `sha256:<hash>` (the import report includes the source path), so both fit even a one-word evidence limit.
 
 Existing lessons remain readable, recallable and archivable after lowering a word limit. Saving or editing a lesson must satisfy the current limits.
 

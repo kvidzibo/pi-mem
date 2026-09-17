@@ -180,12 +180,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
           } else if (command === "get") {
             request = { action: "get", id: rest };
           } else if (command === "add") {
-            request = { action: "add", text: rest, basis: "user_request", evidence: "User invoked /memory add." };
+            request = { action: "add", text: rest, basis: "user_request", evidence: "User-requested." };
           } else if (command === "edit" || command === "archive" || command === "restore") {
             const [id, text] = firstWord(rest);
             const item = store.get(scope, id);
             request = { action: command === "edit" ? "update" : command, id, revision: item.revision,
-              text, basis: "user_request", evidence: `User invoked /memory ${command}.` };
+              text, basis: "user_request", evidence: "User-requested." };
           } else {
             throw new Error(HELP);
           }
