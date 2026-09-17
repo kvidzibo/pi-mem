@@ -10,7 +10,7 @@ Requires Pi **0.85.1 or later**, Git for repository scoping, and Node **22.19+**
 pi install git:github.com/kvidzibo/pi-mem
 ```
 
-For a local checkout, use `pi install /absolute/path/to/pi-mem` instead. Load the package once, through `packages`, not also through `extensions`. Run `/reload` in existing Pi sessions afterward. Installing changes Pi settings, not your agent instruction files.
+For reproducible installs, append `@<tag-or-commit>` to the Git source. For a local checkout, use `pi install /absolute/path/to/pi-mem` instead. Load the package once, through `packages`, not also through `extensions`. Run `/reload` in existing Pi sessions afterward. Installing changes Pi settings, not your agent instruction files.
 
 Capture timing belongs to the agent's rules: after fixing a failed attempt, save one validated reusable lesson during an authorized workspace-write task, or save on an explicit user memory request. The package does not rewrite agent rules. An agent without that policy can still use the memory tool and commands, but selective automatic capture is not guaranteed.
 
@@ -72,7 +72,7 @@ Initialization failures are reported in the UI and model context without prevent
 | `/memory reload` | Reconnect and reread extension configuration |
 | `/memory help` | Command reference |
 
-Use full IDs from list/search. Command arguments after `import`/`export` are literal paths relative to Pi's cwd; spaces work without shell quoting. Commands are primarily for the TUI/RPC UI. The `memory` tool works in noninteractive modes too.
+Use full IDs from list/search. Command arguments after `import`/`export` are literal paths relative to Pi's cwd; spaces work without shell quoting. Commands are primarily for the TUI/RPC UI. In print/JSON modes, command reports become Pi custom messages rather than UI notifications: they can persist in saved sessions and later model context, including the database path and displayed lessons. These reports are not the replaceable recall block. The `memory` tool works in noninteractive modes too.
 
 ## Agent tool
 
@@ -95,10 +95,10 @@ Example save:
 - `update`/`archive`/`restore` require the current `revision`. A concurrent change fails rather than overwriting newer data; fetch the lesson again before retrying.
 - Whitespace/Unicode-normalized exact duplicates return their existing IDs. This is not semantic deduplication. Adding an archived duplicate does not restore it.
 - Updates replace the previous text; revisions detect conflicts, **not** retained edit history. Archive/restore is reversible.
-- `list`/`search` accept `state` (`active`, `archived`, `all`), `offset`, and `limit` (1–30). Results are capped at 16 KiB with `nextOffset` for continuation. Search is a literal, case-insensitive substring match using SQLite's built-in lowercase behavior (ASCII case folding).
+- `list`/`search` accept `state` (`active`, `archived`, `all`), `offset`, and `limit` (1–30). Results are capped at 16 KiB with `nextOffset` for continuation. Pages/counts are live views, not a frozen snapshot; concurrent edits can shift entries during paging. Search is a literal, case-insensitive substring match using SQLite's built-in lowercase behavior (ASCII case folding).
 - `--no-session` still recalls memory. Persistent tool writes in ephemeral sessions require `basis: "user_request"`; explicit commands remain available.
 
-No secrets, raw transcripts, or speculative fixes belong in memory. Recalled lessons are reference data, not authority to override task instructions or repository evidence. Storage is local and newly created databases are private (mode `0600`), but **not encrypted**. Recalled content goes to the selected model, including hosted providers, like other conversation context.
+No secrets, raw transcripts, or speculative fixes belong in memory. Recalled lessons are reference data, not authority to override task instructions or repository evidence. Storage is local and newly created databases are private (mode `0600`), but **not encrypted**. Automatic recall sends lesson text, evidence, IDs/revisions, and the canonical project path to the selected model, including hosted providers. Tool results and command reports can also include source-session provenance or the database path, depending on the operation and mode.
 
 ## Migrating existing MEMORY.md files
 
