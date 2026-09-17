@@ -132,6 +132,8 @@ export function retireSource(scope: string, source: MarkdownSource): SourceRetir
   assertSourceUnchanged(scope, source);
   if (lstatSync(source.path).isSymbolicLink()) throw new Error("Source is a symlink; retained for manual cleanup");
   const directory = mkdtempSync(join(dirname(source.realpath), ".pi-mem-backup-"));
+  // Private permissions do not prevent Git staging; ignore this new directory's contents without editing project rules.
+  writeFileSync(join(directory, ".gitignore"), "*\n", { flag: "wx", mode: 0o600 });
   const backup = join(directory, "reviewed-original.md");
   const movedSource = join(directory, "moved-source");
   // An independent snapshot survives even a writer holding the original file descriptor open across rename.

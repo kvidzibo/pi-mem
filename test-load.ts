@@ -276,6 +276,9 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     assert.equal(existsSync(file), false);
     assert.equal(readFileSync(result.backup, "utf8"), original);
     assert.equal(statSync(dirname(result.backup)).mode & 0o777, 0o700);
+    assert.deepEqual(execFileSync("git", ["-C", project, "check-ignore", result.backup, result.movedSource], { encoding: "utf8" }).trim().split("\n"),
+      [result.backup, result.movedSource], "private recovery files must also be excluded from ordinary Git staging");
+    assert.doesNotMatch(execFileSync("git", ["-C", project, "ls-files", "--others", "--exclude-standard"], { encoding: "utf8" }), /\.pi-mem-backup-/);
     recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /Keep historical lessons recoverable/);
     assert.doesNotMatch(recall.messages[0].content, /Legacy Markdown memory/);
