@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isInside } from "./project.ts";
 import { checkedText, checkNew, MAX_TEXT, type MemoryStore, type Origin } from "./store.ts";
@@ -123,43 +123,6 @@ export function commitImport(store: MemoryStore, scope: string, preview: ImportP
 export function importMarkdown(store: MemoryStore, scope: string, cwd: string, file: string, origin: Origin) {
   const source = readMarkdownSource(scope, cwd, file);
   return saveImport(store, scope, source, parseMarkdown(source.text), origin);
-}
-
-export interface SourceRetirement { backup: string; movedSource?: string; sourceRetained: boolean; cleanupError?: string }
-
-/** Keep every moved byte recoverable; detect replacement races and restore without overwriting newer data. */
-export function retireSource(scope: string, source: MarkdownSource): SourceRetirement {
-  assertSourceUnchanged(scope, source);
-  if (lstatSync(source.path).isSymbolicLink()) throw new Error("Source is a symlink; retained for manual cleanup");
-  const directory = mkdtempSync(join(dirname(source.realpath), ".pi-mem-backup-"));
-  // Private permissions do not prevent Git staging; ignore this new directory's contents without editing project rules.
-  writeFileSync(join(directory, ".gitignore"), "*\n", { flag: "wx", mode: 0o600 });
-  const backup = join(directory, "reviewed-original.md");
-  const movedSource = join(directory, "moved-source");
-  // An independent snapshot survives even a writer holding the original file descriptor open across rename.
-  writeFileSync(backup, source.text, { flag: "wx", mode: 0o600 });
-  let movedFile = false;
-  try {
-    // A private, same-filesystem destination makes this an atomic, non-destructive move.
-    assertSourceUnchanged(scope, source);
-    renameSync(source.path, movedSource);
-    movedFile = true;
-    const moved = readMarkdownSource(scope, scope, movedSource);
-    // Renaming changes ctime, so compare identity, content and mtime instead.
-    if (moved.dev !== source.dev || moved.ino !== source.ino || moved.sha256 !== source.sha256 || moved.mtimeMs !== source.mtimeMs) {
-      throw new Error("Source changed during removal");
-    }
-  } catch (error) {
-    let restored = false;
-    if (movedFile) {
-      try { linkSync(movedSource, source.path); restored = true; } catch { /* Never overwrite another writer's new path. */ }
-    }
-    return { backup, ...(movedFile ? { movedSource } : {}), sourceRetained: restored || existsSync(source.path),
-      cleanupError: `${error instanceof Error ? error.message : String(error)}. ` +
-        `${!movedFile ? "Source not moved" : restored ? "Moved file restored at source" : "Could not restore without overwriting or violating filesystem constraints"}; ` +
-        `recovery files remain in ${JSON.stringify(directory)}. Inspect them before further cleanup.` };
-  }
-  return { backup, movedSource, sourceRetained: false };
 }
 
 export function exportPath(scope: string, cwd: string, file: string): string {

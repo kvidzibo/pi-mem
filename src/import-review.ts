@@ -1,7 +1,7 @@
 import { BorderedLoader, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
-import { commitImport, prepareImport, readMarkdownSource, retireSource, type ImportPreview, type MarkdownSource } from "./markdown.ts";
+import { commitImport, prepareImport, readMarkdownSource, type ImportPreview, type MarkdownSource } from "./markdown.ts";
 import type { MemoryStore, Origin } from "./store.ts";
 
 /** Render control/bidi characters visibly; source data must not issue terminal commands or disguise the diff. */
@@ -163,23 +163,8 @@ export async function reviewedImport(ctx: ExtensionContext, options: ImportOptio
     preview = prepareImport(source, edited, limits);
   }
   check();
-  const result = await withFileMutationQueue(source.realpath, async () => {
+  return withFileMutationQueue(source.realpath, async () => {
     check();
     return commitImport(store, scope, preview, origin);
   });
-  // Commit is final. A declined/failed cleanup must never be reported as an import rollback.
-  let cleanup: { sourceRetained: boolean; backup?: string; movedSource?: string; cleanupError?: string } = { sourceRetained: true };
-  try {
-    ctx.ui.notify(`Import committed: ${result.imported} new, ${result.existing} existing (${result.archived} archived). Source retained.`, "info");
-    check();
-    const remove = "Remove source from cwd (keep original backup)";
-    if (await ctx.ui.select(`Remove ${JSON.stringify(file)}? A private .pi-mem-backup-* directory beside it will retain the original.`,
-      ["Keep source file", remove], { signal }) === remove) {
-      cleanup = await withFileMutationQueue(source.realpath, async () => { check(); return retireSource(scope, source); });
-    }
-  } catch (error) {
-    cleanup.cleanupError = String(error instanceof Error ? error.message : error);
-  }
-  if (cleanup.cleanupError) cleanup.cleanupError = visible(cleanup.cleanupError);
-  return { ...result, ...cleanup };
 }

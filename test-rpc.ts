@@ -58,7 +58,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
         value = allowImport ? event.options!.at(-1) : event.options![0];
       } else {
         removalOffers++;
-        value = event.options![0]; // Keep source, independently of import approval.
+        value = event.options![0];
       }
     }
     if (value !== undefined) {
@@ -100,7 +100,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.equal(imported.imported, 1);
     assert.equal(imported.sourceRetained, true);
     assert.equal(reviewed, 2);
-    assert.equal(removalOffers, 1);
+    assert.equal(removalOffers, 0, "successful imports must not offer source removal");
     assert.equal(readFileSync(join(project, "MEMORY.md"), "utf8"), legacy);
     await client.stop();
     client = new RpcClient({ ...options, cwd: other });
