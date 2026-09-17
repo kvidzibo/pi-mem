@@ -1,0 +1,33 @@
+{
+  "name": "@kvidzibo/pi-mem",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLite-backed project memory for Pi",
+  "license": "UNLICENSED",
+  "repository": { "type": "git", "url": "git+https://github.com/kvidzibo/pi-mem.git" },
+  "homepage": "https://github.com/kvidzibo/pi-mem#readme",
+  "bugs": { "url": "https://github.com/kvidzibo/pi-mem/issues" },
+  "type": "module",
+  "keywords": ["pi-package"],
+  "files": ["src", "README.md"],
+  "engines": { "node": ">=22.19.0" },
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "test": "npm run check && npm run test:unit && npm run test:load",
+    "check": "tsc --noEmit",
+    "test:unit": "node --test --experimental-strip-types tests/*.test.ts",
+    "test:load": "xvfb-run -a node --test --experimental-strip-types test-load.ts test-rpc.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@types/node": "22.20.3",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}
