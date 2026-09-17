@@ -23,12 +23,12 @@ export interface ImportPreview {
   sha256: string;
 }
 
-/** Deliberately strict: never silently discard prose during a migration. */
-export function parseMarkdown(markdown: string): string[] {
+/** Recognize lesson boundaries without applying storage limits to the legacy source. */
+export function splitMarkdownLessons(markdown: string): string[] {
   const items: string[] = [];
   let current: string[] | undefined;
   const flush = () => {
-    if (current) items.push(checkedText(current.join("\n"), "imported lesson", MAX_TEXT));
+    if (current) items.push(current.join("\n"));
     current = undefined;
   };
   for (const [index, line] of markdown.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
@@ -47,8 +47,14 @@ export function parseMarkdown(markdown: string): string[] {
     }
   }
   flush();
-  if (!items.length || items.length > 500) throw new Error("Import requires 1–500 bulleted lessons");
   return items;
+}
+
+/** Deliberately strict: never silently discard prose during a migration. */
+export function parseMarkdown(markdown: string): string[] {
+  const items = splitMarkdownLessons(markdown);
+  if (!items.length || items.length > 500) throw new Error("Import requires 1–500 bulleted lessons");
+  return items.map((text) => checkedText(text, "imported lesson", MAX_TEXT));
 }
 
 export function readMarkdownSource(scope: string, cwd: string, file: string): MarkdownSource {
@@ -90,11 +96,24 @@ export function assertSourceUnchanged(scope: string, source: MarkdownSource): vo
   }
 }
 
-export function prepareImport(source: MarkdownSource, markdown: string, limits: Readonly<MemoryLimits>): ImportPreview {
+export function prepareImport(source: MarkdownSource, markdown: string, limits: Readonly<MemoryLimits>, expectedCount?: number): ImportPreview {
   if (Buffer.byteLength(markdown) > MAX_IMPORT_BYTES) throw new Error("Import draft exceeds 1 MiB");
-  const texts = parseMarkdown(markdown).map((text) => checkNew({
-    text, evidence: `sha256:${source.sha256}`, basis: "import",
-  }, limits).text);
+  const items = splitMarkdownLessons(markdown);
+  if (!items.length || items.length > 500) throw new Error("Import requires 1–500 bulleted lessons");
+  const errors: string[] = [];
+  if (expectedCount !== undefined && items.length !== expectedCount) {
+    errors.push(`Draft has ${items.length} lessons; source has ${expectedCount}. Keep exactly one lesson per source item, in source order`);
+  }
+  const texts: string[] = [];
+  items.forEach((text, index) => {
+    try {
+      texts.push(checkNew({ text, evidence: `sha256:${source.sha256}`, basis: "import" }, limits).text);
+    } catch (error) {
+      errors.push(`Lesson ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  // Return all numbered errors so one correction pass can fix the whole batch, never just its first invalid lesson.
+  if (errors.length) throw new AggregateError(errors, errors.join("\n"));
   // Show exactly the text that will be stored, including whitespace normalization.
   const normalized = "# Project memory\n\n" + texts.map((text) => "- " + text.replaceAll("\n", "\n  ")).join("\n") + "\n";
   return { source, markdown: normalized, texts, sha256: createHash("sha256").update(normalized).digest("hex") };

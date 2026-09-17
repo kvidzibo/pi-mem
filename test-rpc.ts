@@ -48,8 +48,11 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     if (event.type !== "extension_ui_request") return;
     let value: string | undefined;
     if (event.method === "editor") {
-      assert.match(event.prefill!, /--- .*MEMORY.md/);
-      assert.match(event.prefill!, /\+- Preserve reviewed import originals/);
+      assert.match(event.prefill!, /Source: .*MEMORY.md/);
+      assert.match(event.prefill!, /Database:/);
+      assert.match(event.prefill!, /1 source lessons → 1 proposed lessons/);
+      assert.match(event.prefill!, /Lesson 1 · Unchanged · 4 words\n  Preserve reviewed import originals\./);
+      assert.equal(event.prefill!.split("Preserve reviewed import originals.").length - 1, 1, "unchanged text is shown once");
       reviewed++;
       value = event.prefill;
     } else if (event.method === "select") {

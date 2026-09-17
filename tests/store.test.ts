@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,62 @@ test("lessons persist, deduplicate, stay project-scoped and archive without resu
   assert.equal(db.list("/projects/a", { query: "PYTHON" }).lessons[0].text, edited.text);
   assert.equal(db.list("/projects/a", { query: "%' OR 1=1 --" }).total, 0);
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("schema 1 upgrades preserve lessons and accept verified discoveries", (t) => {
+  const path = temporary(t);
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE lessons (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1200),
+      text_key TEXT NOT NULL,
+      evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND 600),
+      basis TEXT NOT NULL CHECK(basis IN ('validated_fix', 'user_request', 'import')),
+      source_harness TEXT NOT NULL,
+      source_session TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+      UNIQUE(scope, text_key)
+    );
+    CREATE INDEX lessons_recall ON lessons(scope, archived, updated_at DESC, id);
+    PRAGMA application_id = ${0x504d454d};
+    PRAGMA user_version = 1;
+  `);
+  for (const [i, basis] of ["validated_fix", "user_request", "import"].entries()) {
+    const text = `Legacy ${basis} lesson.`;
+    legacy.prepare("INSERT INTO lessons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      `old-${i}`, "/project", text, createHash("sha256").update(text).digest("hex"), "Previously verified.",
+      basis, "legacy", i === 0 ? null : "old-session", 100 + i, 200 + i, 3 + i, i === 0 ? 1 : 0,
+    );
+  }
+  const original = legacy.prepare("SELECT * FROM lessons ORDER BY id").all();
+  legacy.close();
+
+  let db = new MemoryStore(path);
+  t.after(() => db.close());
+  const migrated = new DatabaseSync(path);
+  try {
+    assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all(), original);
+    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 2);
+    assert.equal(migrated.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+    assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_recall'").get());
+    assert.equal(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_v1'").get(), undefined);
+  } finally {
+    migrated.close();
+  }
+  const archived = db.get("/project", "old-0");
+  assert.deepEqual(db.add("/project", archived, source), { created: false, lesson: archived });
+  const learned = db.add("/project", { ...input, basis: "validated_learning" }, source).lesson;
+  const updated = db.update("/project", learned.id, learned.revision,
+    { ...input, text: "Build assets before packaging.", basis: "validated_learning" }, source);
+  db.close();
+  db = new MemoryStore(path);
+  assert.deepEqual(db.get("/project", learned.id), updated);
+  assert.equal(updated.basis, "validated_learning");
 });
 
 test("two connections reject stale revisions instead of losing an update", (t) => {
