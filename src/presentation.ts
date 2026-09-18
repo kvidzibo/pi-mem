@@ -24,16 +24,15 @@ export function clipped(text: string, bytes: number): string {
 }
 
 /** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(scope: string, page: RecallPage): { text: string; loaded: number; loadedIds: string[] } {
-  const rows: Array<Pick<Lesson, "id" | "text" | "evidence">> = [];
+export function memoryContext(page: RecallPage): { text: string; loaded: number; loadedIds: number[] } {
+  const rows: Array<Pick<Lesson, "id" | "text">> = [];
   const render = () => [
-    "Project memory (stored reference data)",
-    `Project: ${clipped(JSON.stringify(scope), 768)}`,
-    `${rows.length} of ${page.total} active lessons loaded. Omitted lessons remain stored but are not available on demand.`,
-    JSON.stringify(rows),
+    "PROJECT LESSONS",
+    ...rows.map((row) => `- ${row.text.replace(/\s+/gu, " ")} #${row.id}`),
+    ...(rows.length < page.total ? [`[${page.total - rows.length} lessons omitted.]`] : []),
   ].join("\n");
   for (const row of page.lessons) {
-    rows.push({ id: row.id, text: row.text, evidence: row.evidence });
+    rows.push({ id: row.id, text: row.text });
     if (Buffer.byteLength(render()) > CONTEXT_BYTES) {
       rows.pop();
       break;

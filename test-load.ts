@@ -165,8 +165,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
     const limitedRecall = (await event("context", { messages: [user] })).messages[0].content;
-    assert.match(limitedRecall, /1 of 3 active lessons loaded/);
     const [sqliteRecall, legacyRecall] = limitedRecall.split("\n\n");
+    assert.match(sqliteRecall, /^PROJECT LESSONS\n- /);
+    assert.match(sqliteRecall, /\n\[2 lessons omitted\.\]$/);
+    assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     assert.match(legacyRecall, /Legacy Markdown memory/);
     expectStatus(1, 3, sqliteRecall); // Omitted lessons and separately recalled legacy text do not inflate this count.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
@@ -374,9 +376,11 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     const bulk = Array.from({ length: 500 }, (_, i) => `- Imported lesson ${i}.`).join("\n") + "\n";
     writeFileSync(file, bulk);
     await command.handler("import", ctx);
-    assert.ok(Buffer.byteLength(notices.at(-1)!) > 16384, "exercise reports beyond the usual display limit");
     result = JSON.parse(notices.at(-1)!);
     assert.equal(result.ids.length, 500);
+    // Integer IDs shrink the report; verify the full batch, not a UUID-dependent minimum byte size.
+    assert.deepEqual(result.ids.map((id: number) => observer!.get(project, id).text),
+      Array.from({ length: 500 }, (_, i) => `Imported lesson ${i}.`));
     assert.equal(result.imported, 500);
     assert.equal(result.sourceRetained, true);
     assert.equal(readFileSync(file, "utf8"), bulk, "large imports must preserve the source too");
@@ -493,7 +497,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Replace lesson", text: "Seed 0. Corrected." },
       { title: "Review replacement", choice: "Save" },
       { title: "Browse / search", choice: "Seed 0. Corrected.", match: /Search: Seed 0\./ },
-      { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: ${original.id}`) },
+      { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: #${original.id}`) },
       { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
       { title: "Lesson details", choice: "Archive…" },
       { title: "Archive lesson?", choice: "Cancel", match: /future recall[\s\S]*already in a conversation/ },
@@ -547,7 +551,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     ctx.hasUI = false; ctx.mode = "print";
     await command.handler("", ctx);
     assert.equal(messages.length, 1);
-    assert.match(messages[0].content, /Database:[\s\S]*0 of 0 active lessons loaded/);
+    assert.match(messages[0].content, /^Database: .+\nPROJECT LESSONS$/);
   } finally {
     await event("session_shutdown");
     observer?.close();

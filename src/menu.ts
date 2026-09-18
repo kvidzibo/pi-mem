@@ -78,18 +78,19 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     }
   }
 
-  async function details(initialId: string) {
+  async function details(initialId: number) {
     const history = [initialId];
     while (history.length) {
       const { store, scope } = access.current();
       const lesson = store.get(scope, history.at(-1)!);
-      const loaded = memoryContext(scope, store.recall(scope)).loadedIds.includes(lesson.id);
+      const loaded = memoryContext(store.recall(scope)).loadedIds.includes(lesson.id);
       const body = [
         lesson.text, "", `Evidence: ${lesson.evidence}`, "",
         `State: ${lesson.archived ? "archived (not recalled)" : loaded ? "active · loaded into recall" : "active · omitted by recall limits"}`,
         `Created: ${new Date(lesson.created_at).toISOString()}`, `Basis: ${lesson.basis}`,
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
-        `ID: ${lesson.id}`, `Predecessor: ${lesson.supersedes_id ?? "(none)"}`,
+        `ID: #${lesson.id}`, `Predecessor: ${lesson.supersedes_id === null ? "(none)" : `#${lesson.supersedes_id}`}`,
+        ...(lesson.legacy_id === null ? [] : [`Legacy ID: ${lesson.legacy_id}`]),
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
           "Archived records are read-only. No restore or delete."] : []),
       ].join("\n");
@@ -124,8 +125,8 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
         page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
       }
-      const loaded = new Set(memoryContext(scope, store.recall(scope)).loadedIds);
-      const rows = page.lessons.map((lesson, index) => item(lesson.id,
+      const loaded = new Set(memoryContext(store.recall(scope)).loadedIds);
+      const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
         `${offset + index + 1}. [${archived ? "archived" : loaded.has(lesson.id) ? "loaded" : "omitted"}] ${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
       const body = [
         query ? `Search: ${query}` : "All lessons · newest first",
@@ -150,7 +151,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       else if (action === "previous") { offset = Math.max(0, offset - PAGE_SIZE); selected = undefined; }
       else {
         selected = action;
-        try { await details(action); }
+        try { await details(Number(action)); }
         catch (error) { access.check(); reportError(error); }
       }
     }
@@ -161,7 +162,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     try {
       const { store, path, scope, limits } = access.current();
       const page = store.recall(scope);
-      const recalled = memoryContext(scope, page);
+      const recalled = memoryContext(page);
       lines.push(`Project scope: ${JSON.stringify(scope)}`, `Database: ${JSON.stringify(path)}`,
         `Active: ${page.total} · Loaded: ${recalled.loaded} · Omitted: ${page.total - recalled.loaded}`,
         `Archived: ${store.list(scope, { state: "archived", limit: 1 }).total}`,
@@ -185,7 +186,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     try {
       state = access.current();
       const page = state.store.recall(state.scope);
-      const recalled = memoryContext(state.scope, page);
+      const recalled = memoryContext(page);
       summary = `${page.total} active · ${recalled.loaded} loaded into context`;
       if (!page.total) summary += "\nNo lessons yet. Add a lesson or import Markdown.";
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }

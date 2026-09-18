@@ -189,7 +189,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…", "Status & limits", "Reload memory", "Help"]);
     const recalled = await command("/memory reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
-    assert.match(recalled, /0 of 0 active lessons/);
+    assert.match(recalled, /^Database: .+\nPROJECT LESSONS$/);
     assert.equal(events.filter((event) => event.type === "agent_start" || event.type === "extension_error").length, 0);
   } finally {
     await client.stop();

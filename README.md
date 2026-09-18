@@ -34,7 +34,7 @@ Run **`/memory`** to open the project menu in TUI or RPC mode:
 
 Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls; import drafting is the existing explicit exception. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
 
-The footer shows `memory loaded/active · ~N tok`. Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—including evidence, IDs, and headers—but excludes omitted/archived lessons and legacy `MEMORY.md`.
+The footer shows `memory loaded/active · ~N tok`. Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, integer IDs, heading, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
 
 Direct commands remain available; without UI, `/memory` retains its text status output:
 
@@ -53,7 +53,7 @@ Direct commands remain available; without UI, `/memory` retains its text status 
 | `/memory reload` | Reread configuration and reconnect; also retries initialization failures |
 | `/memory help` | Show command help |
 
-Use full IDs from recall or inspection commands. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
+IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. Migrated UUIDs remain accepted as aliases for old references. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
 
 `--no-session` still recalls memory. Agent writes in ephemeral sessions require `basis: "user_request"`; explicit user commands remain available.
 
@@ -78,6 +78,18 @@ Limits must be positive safe integers. Words are whitespace-separated; overlong 
 - **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load newest-created first, with stable ID tie-breaking, up to `maxRecallLessons` or **8 KiB**, whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
 - **Archiving:** changes future database recall only. It cannot erase text already present elsewhere in a conversation or sent to a model.
 
+The injected SQLite block contains only the heading and lesson text with stable IDs:
+
+```text
+PROJECT LESSONS
+- Use the project-local environment. #42
+- Preserve reviewed import originals. #43
+```
+
+Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, legacy UUIDs, and predecessor links stay in SQLite and the `/memory` UI, not automatic recall.
+
+This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/memory` marks loaded/omitted lessons; `/memory reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; long legacy output can be clipped).
+
 ## Legacy files and imports
 
 A case-insensitive `MEMORY.md` in Pi's **current directory** is recalled separately, with a migration warning and a **32 KiB** context cap. No parent/child directory search or automatic import occurs.
@@ -96,7 +108,7 @@ Imported `MEMORY.md` files continue to be recalled until you move or rename them
 
 - Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons, legacy text, and project paths go to the selected model, including hosted providers. Import drafting sends source text to that model. Print/JSON command reports can persist in session history and later model context.
 - Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Markdown exports contain active text only and are **not database backups**. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
-- **Back up before upgrading.** Schema v1/v2 databases upgrade automatically to **v3** on open, retaining existing records and metadata. Previously overwritten content cannot be recovered. Older releases cannot open v3: keep v3-capable code or a compatible backup for rollback, and `/reload` all Pi sessions after upgrading.
+- **Back up before upgrading.** Schema v1/v2/v3 databases upgrade atomically to **v4** on open. All records and metadata are retained; UUIDs become legacy aliases, integer IDs are assigned once, and predecessor links are remapped. Previously overwritten content cannot be recovered. Older releases cannot open v4: keep v4-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation
 

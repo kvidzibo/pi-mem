@@ -70,7 +70,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function snapshot(ctx: ExtensionContext) {
     const { store, scope } = current(ctx);
     const page = store.recall(scope);
-    const result = memoryContext(scope, page);
+    const result = memoryContext(page);
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
       ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total} · ~${tokens.toLocaleString("en-US")} tok`);
@@ -227,7 +227,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
     promptSnippet: "Add, supersede, or archive project lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
-      id: Type.Optional(Type.String({ maxLength: 80 })),
+      id: Type.Optional(Type.Union([
+        Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+        Type.String({ minLength: 1, maxLength: 80 }),
+      ], { description: "Stable lesson number from the #id suffix; legacy UUID references are also accepted." })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),

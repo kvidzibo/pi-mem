@@ -1,9 +1,9 @@
-import { MemoryStore, type Basis, type Origin } from "./store.ts";
+import { MemoryStore, type Basis, type LessonId, type Origin } from "./store.ts";
 
 export const ACTIONS = ["add", "supersede", "archive"] as const;
 export interface MemoryRequest {
   action: typeof ACTIONS[number];
-  id?: string;
+  id?: LessonId;
   text?: string;
   evidence?: string;
   basis?: Exclude<Basis, "import">;
@@ -34,7 +34,8 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
   }
 }
 
-function requireId(request: MemoryRequest): string {
-  if (typeof request.id !== "string" || !request.id.trim()) throw new Error("This action requires id");
-  return request.id;
+function requireId(request: MemoryRequest): LessonId {
+  if (typeof request.id === "number" && Number.isSafeInteger(request.id) && request.id > 0) return request.id;
+  if (typeof request.id === "string" && request.id.trim()) return request.id;
+  throw new Error("This action requires a positive integer id (legacy references are also accepted)");
 }
