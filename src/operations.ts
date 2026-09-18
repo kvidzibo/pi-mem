@@ -27,7 +27,7 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
     }
     case "archive": {
       const result = store.archive(scope, parseLessonId(request.id));
-      return { id: result.id, archived: result.archived, scope };
+      return { id: result.lesson.id, archived: result.lesson.archived, changed: result.changed, scope };
     }
     default:
       throw new Error("Unknown memory action");

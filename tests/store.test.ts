@@ -44,9 +44,12 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   assert.deepEqual([...db.recall("/projects/a").lessons], [replacement]);
   const successor = db.supersede("/projects/a", replacement.id, { ...input, text: "Run .venv/bin/python -m pytest." }, source);
   assert.equal(successor.supersedes_id, replacement.id);
-  const archived = db.archive("/projects/a", successor.id);
+  const { lesson: archived, changed } = db.archive("/projects/a", successor.id);
+  assert.equal(changed, true);
   assert.ok(archived.archived_at! >= successor.created_at);
-  assert.deepEqual(db.archive("/projects/a", successor.id), archived, "repeated archive must not change its timestamp");
+  assert.deepEqual(db.archive("/projects/a", successor.id), { lesson: archived, changed: false }, "repeated archive must not change its timestamp or count again");
+  assert.deepEqual(db.sessionCreations("/projects/a", source), { added: 2, superseded: 1 });
+  assert.deepEqual(db.sessionCreations("/projects/a", replacementSource), { added: 1, superseded: 1 });
   assert.equal(db.list("/projects/a").total, 0);
   const fresh = db.add("/projects/a", { ...input, text: successor.text }, source);
   assert.equal(fresh.created, true);
@@ -164,7 +167,7 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
   const successor = db.supersede("/project", predecessor.id,
     { ...input, text: "Build assets before packaging.", basis: "validated_learning" }, source);
   assert.equal(successor.supersedes_id, predecessor.id);
-  assert.equal(db.archive("/project", predecessor.id).id, predecessor.id);
+  assert.equal(db.archive("/project", predecessor.id).lesson.id, predecessor.id);
   db.close();
   db = new MemoryStore(path);
   assert.deepEqual(db.get("/project", successor.id), successor);

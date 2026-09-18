@@ -10,7 +10,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const DIST = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 type Event = { type: string; id?: string; method?: string; message?: string; notifyType?: string;
   title?: string; prefill?: string; options?: string[]; statusKey?: string; statusText?: string;
-  entry?: { customType: string; data: Array<{ id: number; text: string; supersedes_id: number | null }> } };
+  entry?: { customType: string; data: unknown } };
 
 test("real offline Pi processes save, reload across sessions, and isolate projects without model calls", { timeout: 90000 }, async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-mem-rpc-")));
@@ -168,6 +168,12 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.equal(JSON.parse(await command("/memory search Must not save stale text.")).total, 0);
     assert.equal(JSON.parse(await command("/memory list")).total, 1);
     assert.deepEqual(await client.getMessages(), messagesBeforeBrowse);
+    const replacement = JSON.parse(await command(`/memory supersede ${saved.id} A verified lesson from the RPC smoke test.`));
+    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/, "superseding adds one and archives one in the current session");
+    assert.equal(JSON.parse(await command(`/memory archive ${saved.id}`)).changed, false);
+    await command("/memory reload");
+    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/);
+    assert.equal(saveCards().length, 2);
     await client.stop();
     client = new RpcClient({ ...options, cwd: project });
     listen();
@@ -183,10 +189,21 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.equal(imported.sourceRetained, true);
     assert.match(memoryStatus(), /^memory 2\/2 \(\+1\) ·/);
     assert.deepEqual(saveCards().at(-1)!.entry!.data, [{ id: imported.createdIds[0], text: "Preserve reviewed import originals.", supersedes_id: null }]);
-    assert.equal(saveCards().length, 2, "cancelled imports and menu edits must not add save entries");
+    assert.equal(saveCards().length, 3, "cancelled imports and menu edits must not add save entries");
     assert.equal(reviewed, 2);
     assert.equal(removalOffers, 0, "successful imports must not offer source removal");
     assert.equal(readFileSync(join(project, "MEMORY.md"), "utf8"), legacy);
+    assert.equal(JSON.parse(await command(`/memory archive ${replacement.id}`)).changed, true);
+    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/, "one addition and one explicit archive keep separate counts");
+    const archiveCards = () => events.filter((event) => event.type === "entry_appended" && event.entry?.customType === "pi-mem-archived");
+    assert.equal(archiveCards().length, 1);
+    assert.deepEqual(archiveCards()[0].entry!.data, { id: replacement.id, text: "A verified lesson from the RPC smoke test.",
+      scope: project, database: env.PI_MEMORY_DB, session: (await client.getState()).sessionId });
+    assert.equal(JSON.parse(await command(`/memory archive ${replacement.id}`)).changed, false);
+    await command("/memory reload");
+    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/);
+    assert.equal(archiveCards().length, 1);
+    assert.deepEqual(await client.getMessages(), [], "archive activity must not become model messages");
     await client.stop();
     client = new RpcClient({ ...options, cwd: other });
     listen();

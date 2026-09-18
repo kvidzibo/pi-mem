@@ -240,13 +240,14 @@ export class MemoryStore {
     return { lessons, total, nextOffset: next < total ? next : null };
   }
 
-  /** Count creations, including replacements and later archives, by this session only. */
-  sessionAdditions(scope: string, origin: Origin): number {
+  /** Creations and their linked predecessor archives remain attributable after reload. */
+  sessionCreations(scope: string, origin: Origin): { added: number; superseded: number } {
     this.checkScope(scope);
     this.checkOrigin(origin);
-    return Number(this.db.prepare(`SELECT count(*) AS n FROM lessons
+    const row = this.db.prepare(`SELECT count(*) AS added, count(supersedes_id) AS superseded FROM lessons
       WHERE scope = ? AND source_harness = ? AND source_session = ?`)
-      .get(scope, origin.harness, origin.session)!.n);
+      .get(scope, origin.harness, origin.session)!;
+    return { added: Number(row.added), superseded: Number(row.superseded) };
   }
 
   recall(scope: string): RecallPage {
@@ -306,12 +307,12 @@ export class MemoryStore {
     });
   }
 
-  archive(scope: string, id: number): Lesson {
+  archive(scope: string, id: number): { lesson: Lesson; changed: boolean } {
     return this.transaction(() => {
       const current = this.get(scope, id);
-      if (current.archived) return current;
+      if (current.archived) return { lesson: current, changed: false };
       this.retire(scope, current.id, Math.max(Date.now(), current.created_at, current.updated_at));
-      return this.get(scope, current.id);
+      return { lesson: this.get(scope, current.id), changed: true };
     });
   }
 

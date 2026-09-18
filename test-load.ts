@@ -35,7 +35,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   const statuses: Array<string | undefined> = [];
   const ctx = {
     cwd: join(directory, "project"), hasUI: true, mode: "rpc",
-    sessionManager: { getSessionId: () => "load-session", getSessionFile: (): string | undefined => "/temporary/session.jsonl" },
+    sessionManager: { getSessionId: () => "load-session", getSessionFile: (): string | undefined => "/temporary/session.jsonl",
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
     ui: {
       notify: (text: string) => notices.push(text), setStatus: (_key: string, text?: string) => statuses.push(text),
       editor: async (_title: string, prefill: string) => prefill,
@@ -46,10 +47,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
-  const expectStatus = (loaded: number, total: number, text: string, added = 0) => {
+  const expectStatus = (loaded: number, total: number, text: string, added = 0, archived = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
-    assert.equal(statuses.at(-1), `memory ${loaded}/${total}${added ? ` (+${added})` : ""} · ~${tokens} tok`);
+    const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
+    assert.equal(statuses.at(-1), `memory ${loaded}/${total}${changes ? ` (${changes})` : ""} · ~${tokens} tok`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -110,7 +112,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     inspection.archive(ctx.cwd, saved.id);
     recall = await event("context", { messages: [user] });
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
-    expectStatus(1, 1, recall.messages[0].content, 2); // Archives do not undo this session's creations.
+    expectStatus(1, 1, recall.messages[0].content, 2); // External archives must not count as this session's actions.
     for (const action of ["get", "list", "search", "history", "update", "restore"]) {
       await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
     }
@@ -121,8 +123,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.notEqual(replacement.id, learned.id);
     assert.equal(savedEntries().length, 3);
     assert.deepEqual(savedEntries().at(-1)!.data, [{ id: replacement.id, text: "Replacement lesson.", supersedes_id: learned.id }]);
-    assert.match(renderer(savedEntries().at(-1), { expanded: false }, { fg: (_color: string, text: string) => text }).render(120).join("\n"),
-      new RegExp(`#${replacement.id} \\(replaces #${learned.id}\\): Replacement lesson\\.`));
+    assert.match(renderer(savedEntries().at(-1), { expanded: false }, { fg: (_color: string, text: string) => text }).render(120)
+      .map((line: string) => line.trimEnd()).join("\n"),
+      new RegExp(`Memory replaced \\(\\+1 -1\\)\\n#${replacement.id} \\(replaces #${learned.id}\\): Replacement lesson\\.`));
     assert.deepEqual(inspection.get(ctx.cwd, learned.id),
       { ...original, archived: true, archived_at: inspection.get(ctx.cwd, replacement.id).created_at });
     await assert.rejects(execute({ ...input, action: "supersede", id: learned.id }), /already archived/);
@@ -131,21 +134,39 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /Replacement lesson/);
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall|Build assets before packaging|memory list\/search/);
-    expectStatus(1, 1, recall.messages[0].content, 3);
+    expectStatus(1, 1, recall.messages[0].content, 3, 1);
     assert.equal(savedEntries().length, 3, "reload must not repeat save entries");
     ctx.sessionManager.getSessionId = () => "new-session";
     await event("session_start", { reason: "new" });
     expectStatus(1, 1, recall.messages[0].content);
+    const older = inspection.add(ctx.cwd, { text: "Previously stored lesson.", evidence: "Verified.", basis: "user_request" },
+      { harness: "pi", session: "older-session" }).lesson;
+    const archived = JSON.parse((await execute({ action: "archive", id: older.id })).content[0].text);
+    assert.equal(archived.changed, true);
+    expectStatus(1, 1, recall.messages[0].content, 0, 1);
+    const archiveCards = (): CustomEntry[] => ctx.sessionManager.getEntries().filter((entry): entry is CustomEntry => entry.type === "custom" && entry.customType === "pi-mem-archived");
+    assert.equal(archiveCards().length, 1);
+    const archiveRenderer = extension.entryRenderers.get("pi-mem-archived");
+    assert.match(archiveRenderer(archiveCards()[0], { expanded: false }, { fg: (_color: string, text: string) => text }).render(100)
+      .map((line: string) => line.trimEnd()).join("\n"), new RegExp(`Memory archived \\(-1\\)\\n#${older.id}: Previously stored lesson\\.`));
+    for (const id of [older.id, saved.id]) {
+      assert.equal(JSON.parse((await execute({ action: "archive", id })).content[0].text).changed, false);
+    }
+    assert.equal(archiveCards().length, 1, "already archived records must not create activity or increment counters");
+    await event("session_shutdown", { reason: "reload" });
+    await event("session_start", { reason: "reload" });
+    expectStatus(1, 1, recall.messages[0].content, 0, 1);
+    assert.deepEqual(extension.sessionLog.buildSessionContext().messages, [], "archive cards must stay outside model context");
     ctx.sessionManager.getSessionId = () => "load-session";
     await event("session_start", { reason: "resume" });
-    expectStatus(1, 1, recall.messages[0].content, 3);
+    expectStatus(1, 1, recall.messages[0].content, 3, 1);
     const command = extension.commands.get("memory");
     await command.handler(`get ${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler(`get #${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler("archived", ctx);
-    assert.equal(JSON.parse(notices.at(-1)!).total, 2);
+    assert.equal(JSON.parse(notices.at(-1)!).total, 3);
     await command.handler("search Replacement", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).lessons[0].id, replacement.id);
     await command.handler(`restore ${learned.id}`, ctx);
@@ -229,6 +250,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const successor = JSON.parse(notices.at(-1)!);
     await command.handler(`archive ${successor.id}`, ctx);
     assert.equal(inspection.get(ctx.cwd, successor.id).archived, true);
+    assert.match(statuses.at(-1)!, /\(\+5 -2\)/, "direct supersede and archive both count their retirements");
+    await command.handler(`archive ${successor.id}`, ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).changed, false);
+    assert.match(statuses.at(-1)!, /\(\+5 -2\)/);
     writeFileSync(join(ctx.cwd, "low evidence.md"), "- Compact imports work.\n");
     await command.handler("import low evidence.md", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).imported, 1, "generated import evidence must fit even when the filename contains spaces");
@@ -269,7 +294,8 @@ test("legacy recall and reviewed import preserve originals, require consent, and
       assert.match(input.messages[0].content, /nonblocking/);
       return { stopReason: "stop", content: [{ type: "text", text: draft }] };
     } },
-    sessionManager: { getSessionId: () => "review-session", getSessionFile: () => "/temporary/session.jsonl" },
+    sessionManager: { getSessionId: () => "review-session", getSessionFile: () => "/temporary/session.jsonl",
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
     ui: {
       notify: (text: string) => notices.push(text), setStatus() {},
       editor: async (title: string, prefill: string) => {
@@ -465,7 +491,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const keys = new KeybindingsManager({ "tui.select.confirm": "ctrl+y", "tui.select.cancel": "ctrl+x" });
   const ctx = {
     cwd: project, hasUI: true, mode: "tui",
-    sessionManager: { getSessionId: () => "menu-session", getSessionFile: () => undefined },
+    sessionManager: { getSessionId: () => "menu-session", getSessionFile: () => undefined,
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
     modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
     ui: {
       notify: (text: string) => notices.push(text), setStatus() {},
@@ -565,8 +592,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.list(project, { state: "archived" }).total, 2);
     assert.equal(observer.list(project, { query: "New menu lesson." }).lessons[0].basis, "user_request");
     assert.equal(messages.length, 0, "browsing and user writes must not inject model-context messages");
-    const saveCards: CustomEntry[] = extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom");
-    assert.equal(saveCards.length, 2, "only approved menu creations should add chat entries");
+    const saveCards: CustomEntry[] = extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
+    assert.equal(saveCards.length, 2, "only approved menu creations should add save entries");
+    assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, 1,
+      "only approved menu archives should add archive entries");
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
 
     // Display normalization must not turn unchanged whitespace into literal escapes or new wording.
@@ -647,7 +676,8 @@ test("lesson-list imports preserve counts and require repaired drafts to be revi
       if (invalidateOnModel) ctx.cwd = directory;
       return { stopReason: "stop", content: [{ type: "text", text: replies.shift() ?? draft }] };
     } },
-    sessionManager: { getSessionId: () => "count-session", getSessionFile: () => "/temporary/session.jsonl" },
+    sessionManager: { getSessionId: () => "count-session", getSessionFile: () => "/temporary/session.jsonl",
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
     ui: {
       notify: (text: string) => notices.push(text), setStatus() {},
       custom: async (factory: any): Promise<any> => {

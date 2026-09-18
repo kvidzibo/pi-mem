@@ -22,6 +22,7 @@ interface MenuAccess {
   check: () => void;
   refresh: () => void;
   saved: (ids: number[]) => void;
+  archived: (id: number) => void;
   importFile: (file: string) => Promise<void>;
   signal: AbortSignal;
   origin: Origin;
@@ -108,7 +109,8 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
           [CANCEL, item("archive", "Archive")]);
         if (confirmed !== "archive") continue;
         const current = access.current();
-        current.store.archive(current.scope, lesson.id);
+        const result = current.store.archive(current.scope, lesson.id);
+        if (result.changed) access.archived(result.lesson.id);
         ctx.ui.notify("Lesson archived; excluded from future recall. Record retained.", "info");
         access.refresh();
         return;

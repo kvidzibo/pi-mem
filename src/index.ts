@@ -14,7 +14,9 @@ import { projectScope } from "./project.ts";
 import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
+type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
+const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
 const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
@@ -70,14 +72,27 @@ export default function memoryExtension(pi: ExtensionAPI) {
     return { harness: "pi", session: ctx.sessionManager.getSessionId() };
   }
 
+  function sessionArchives(ctx: ExtensionContext, database: string, scope: string) {
+    const ids = new Set<number>();
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== ARCHIVED_TYPE) continue;
+      const data = entry.data as ArchivedLesson | undefined;
+      if (data?.session === ctx.sessionManager.getSessionId() && data.database === database && data.scope === scope &&
+          Number.isSafeInteger(data.id) && data.id > 0) ids.add(data.id);
+    }
+    return ids.size;
+  }
+
   function snapshot(ctx: ExtensionContext) {
-    const { store, scope } = current(ctx);
+    const { store, path, scope } = current(ctx);
     const page = store.recall(scope);
     const result = memoryContext(page);
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
-      const added = store.sessionAdditions(scope, origin(ctx));
-      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}${added ? ` (+${added})` : ""} · ~${tokens.toLocaleString("en-US")} tok`);
+      const { added, superseded } = store.sessionCreations(scope, origin(ctx));
+      const archived = superseded + sessionArchives(ctx, path, scope);
+      const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
+      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}${changes ? ` (${changes})` : ""} · ~${tokens.toLocaleString("en-US")} tok`);
     }
     notified = undefined;
     return result;
@@ -115,16 +130,34 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   }
 
+  function recordArchived(id: number, ctx: ExtensionContext) {
+    try {
+      const { store, path, scope } = current(ctx);
+      const { text } = store.get(scope, id);
+      // Archive provenance is not stored on lesson rows; retain it in this session, outside model context.
+      pi.appendEntry<ArchivedLesson>(ARCHIVED_TYPE, { id, text, scope, database: path, session: ctx.sessionManager.getSessionId() });
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`Memory archived, but chat entry failed: ${clipped(String(error), 700)}`, "warning");
+    }
+  }
+
   function recordWrite(result: ReturnType<typeof runMemory>, ctx: ExtensionContext) {
     if (result.status === "saved" || result.status === "superseded") recordSaved([result.id], ctx);
+    if (result.changed) recordArchived(result.id, ctx);
     return result;
   }
 
   pi.registerEntryRenderer<SavedLesson[]>(SAVED_TYPE, (entry, _options, theme) => {
     const lessons = entry.data ?? [];
-    const heading = theme.fg("success", `Memory added (+${lessons.length})`);
+    const replaced = lessons.filter((lesson) => lesson.supersedes_id !== null).length;
+    const heading = theme.fg("success", `Memory ${replaced ? "replaced" : "added"} (+${lessons.length}${replaced ? ` -${replaced}` : ""})`);
     const lines = lessons.map((lesson) => `#${lesson.id}${lesson.supersedes_id ? ` (replaces #${lesson.supersedes_id})` : ""}: ${visible(lesson.text)}`);
     return new Text([heading, ...lines].join("\n"), 0, 0);
+  });
+
+  pi.registerEntryRenderer<ArchivedLesson>(ARCHIVED_TYPE, (entry, _options, theme) => {
+    const lesson = entry.data;
+    return new Text(lesson ? `${theme.fg("warning", "Memory archived (-1)")}\n#${lesson.id}: ${visible(lesson.text)}` : "", 0, 0);
   });
 
   function recall(ctx: ExtensionContext): string {
@@ -205,6 +238,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           check, signal: controller.signal, origin: source, configPath: join(getAgentDir(), "pi-mem.json"), help: HELP,
           refresh: () => { try { snapshot(ctx); } catch (error) { unavailable(error, ctx); } },
           saved: (ids) => recordSaved(ids, ctx),
+          archived: (id) => recordArchived(id, ctx),
           importFile: (file) => { check(); return importFile(file, ctx); },
         });
         check();

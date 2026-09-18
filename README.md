@@ -34,9 +34,9 @@ Run **`/memory`** to open the project menu in TUI or RPC mode:
 
 Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls; import drafting is the existing explicit exception. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
 
-The footer shows `memory loaded/active (+N) · ~N tok`. `(+N)` appears after this session creates lessons, including replacements and imports, but not duplicates. It counts creations, not net growth: archiving does not reduce it. The count survives reload/resume; new sessions and forks start at zero. Other sessions' saves do not count.
+The footer shows `memory loaded/active (+A -R) · ~N tok`, omitting zero counts. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Imports count only new lessons; duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
 
-Each creation adds a chat entry with the saved ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Import entries include only newly created lessons.
+Saves and archives add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Import entries include only newly created lessons.
 
 Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, integer IDs, heading, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
 
