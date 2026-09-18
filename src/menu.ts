@@ -90,7 +90,6 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         `Created: ${new Date(lesson.created_at).toISOString()}`, `Basis: ${lesson.basis}`,
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
         `ID: #${lesson.id}`, `Predecessor: ${lesson.supersedes_id === null ? "(none)" : `#${lesson.supersedes_id}`}`,
-        ...(lesson.legacy_id === null ? [] : [`Legacy ID: ${lesson.legacy_id}`]),
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
           "Archived records are read-only. No restore or delete."] : []),
       ].join("\n");

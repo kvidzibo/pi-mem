@@ -53,7 +53,7 @@ Direct commands remain available; without UI, `/memory` retains its text status 
 | `/memory reload` | Reread configuration and reconnect; also retries initialization failures |
 | `/memory help` | Show command help |
 
-IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. Migrated UUIDs remain accepted as aliases for old references. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
+IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. UUIDs are discarded during migration and are no longer valid references. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
 
 `--no-session` still recalls memory. Agent writes in ephemeral sessions require `basis: "user_request"`; explicit user commands remain available.
 
@@ -86,7 +86,7 @@ PROJECT LESSONS
 - Preserve reviewed import originals. #43
 ```
 
-Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, legacy UUIDs, and predecessor links stay in SQLite and the `/memory` UI, not automatic recall.
+Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/memory` UI, not automatic recall.
 
 This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/memory` marks loaded/omitted lessons; `/memory reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; long legacy output can be clipped).
 
@@ -108,7 +108,7 @@ Imported `MEMORY.md` files continue to be recalled until you move or rename them
 
 - Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons, legacy text, and project paths go to the selected model, including hosted providers. Import drafting sends source text to that model. Print/JSON command reports can persist in session history and later model context.
 - Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Markdown exports contain active text only and are **not database backups**. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
-- **Back up before upgrading.** Schema v1/v2/v3 databases upgrade atomically to **v4** on open. All records and metadata are retained; UUIDs become legacy aliases, integer IDs are assigned once, and predecessor links are remapped. Previously overwritten content cannot be recovered. Older releases cannot open v4: keep v4-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
+- **Back up before upgrading.** Schema v1–v4 databases upgrade atomically to **v5** on open. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing v4 integer IDs remain unchanged and its UUID alias column is removed. Previously overwritten content cannot be recovered. Older releases cannot open v5: keep v5-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation
 

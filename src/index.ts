@@ -7,7 +7,7 @@ import { memoryMenu, type MenuState } from "./menu.ts";
 import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
-import { ACTIONS, runMemory, type MemoryRequest } from "./operations.ts";
+import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Origin } from "./store.ts";
@@ -227,19 +227,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
     promptSnippet: "Add, supersede, or archive project lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
-      id: Type.Optional(Type.Union([
-        Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-        Type.String({ minLength: 1, maxLength: 80 }),
-      ], { description: "Stable lesson number from the #id suffix; legacy UUID references are also accepted." })),
+      id: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
+        description: "Stable lesson number from the #id suffix." })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
     }),
     prepareArguments(args) {
-      // Pi's schema coercion can turn true into 1; reject non-ID types before validation.
-      if (args && typeof args === "object" && "id" in args && args.id != null &&
-          typeof args.id !== "number" && typeof args.id !== "string") {
-        throw new Error("memory id must be a positive integer or a legacy reference");
+      // Parse before Pi's schema coercion can turn true into 1 or accept other non-ID values.
+      if (args && typeof args === "object" && "id" in args && args.id != null) {
+        return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
       }
       return args as MemoryRequest; // The normal schema validation still follows this guard.
     },
@@ -293,14 +290,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
           if (!rest.trim()) throw new Error("search requires query");
           show(boundedPage(store.list(scope, { query: rest }), 0), ctx);
         } else if (command === "get") {
-          show(store.get(scope, rest), ctx);
+          show(store.get(scope, parseLessonId(rest)), ctx);
         } else {
           let request: MemoryRequest;
           if (command === "add") {
             request = { action: "add", text: rest, basis: "user_request", evidence: "User-requested." };
           } else if (command === "supersede" || command === "archive") {
             const [id, text] = firstWord(rest);
-            request = { action: command, id, text, basis: "user_request", evidence: "User-requested." };
+            request = { action: command, id: parseLessonId(id), text, basis: "user_request", evidence: "User-requested." };
           } else {
             throw new Error(HELP);
           }

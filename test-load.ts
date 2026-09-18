@@ -62,6 +62,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
+    assert.equal(tool.parameters.properties.id.type, "integer");
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
@@ -70,8 +71,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
-    await assert.rejects(execute({ action: "archive", id: true }), /id must be a positive integer/);
-    assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "boolean IDs must not be coerced into lesson #1");
+    for (const id of [true, "00000000-0000-4000-8000-000000000001"]) {
+      await assert.rejects(execute({ action: "archive", id }), /id must be a positive safe integer/);
+    }
+    assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
+    assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
     assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
@@ -108,6 +112,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall|Build assets before packaging|memory list\/search/);
     const command = extension.commands.get("memory");
     await command.handler(`get ${learned.id}`, ctx);
+    assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
+    await command.handler(`get #${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler("archived", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).total, 2);

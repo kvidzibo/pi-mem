@@ -9,10 +9,8 @@ export const MAX_EVIDENCE = 600;
 export type Basis = "validated_learning" | "validated_fix" | "user_request" | "import";
 export type State = "active" | "archived" | "all";
 export interface Origin { harness: string; session: string | null }
-export type LessonId = number | string;
 export interface Lesson {
   id: number;
-  legacy_id: string | null;
   scope: string;
   text: string;
   evidence: string;
@@ -32,7 +30,7 @@ export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export function checkedText(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) {
@@ -100,7 +98,7 @@ export class MemoryStore {
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
     const empty = application === 0 && version === 0 &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length === 0;
-    const upgrading = application === APPLICATION_ID && [1, 2, 3].includes(version);
+    const upgrading = application === APPLICATION_ID && [1, 2, 3, 4].includes(version);
     if (!empty && !upgrading) {
       if (application !== APPLICATION_ID || version !== SCHEMA_VERSION) {
         throw new Error(`Not a supported pi-mem database (application=${application}, schema=${version})`);
@@ -119,7 +117,7 @@ export class MemoryStore {
         DROP TRIGGER IF EXISTS lessons_successor_scope;
         ALTER TABLE lessons RENAME TO lessons_previous;
       `);
-      if (version === 3 && this.db.prepare(`SELECT 1 FROM lessons_previous AS child
+      if (version >= 3 && this.db.prepare(`SELECT 1 FROM lessons_previous AS child
         WHERE supersedes_id IS NOT NULL AND NOT EXISTS (
           SELECT 1 FROM lessons_previous AS parent
           WHERE parent.id = child.supersedes_id AND parent.scope = child.scope AND parent.archived = 1)
@@ -128,7 +126,6 @@ export class MemoryStore {
     this.db.exec(`
       CREATE TABLE lessons (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
-        legacy_id TEXT UNIQUE,
         scope TEXT NOT NULL,
         text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND ${MAX_TEXT}),
         text_key TEXT NOT NULL,
@@ -144,26 +141,27 @@ export class MemoryStore {
         supersedes_id INTEGER UNIQUE REFERENCES lessons(id)
       ) WITHOUT ROWID;
     `);
+    // UUIDs exist only in this migration query; already-integer v4 IDs must not be renumbered.
     if (upgrading) this.db.exec(`
       WITH numbered AS (
-        SELECT row_number() OVER (ORDER BY created_at, id) AS new_id, * FROM lessons_previous
+        SELECT ${version === 4 ? "id" : "row_number() OVER (ORDER BY created_at, id)"} AS new_id, * FROM lessons_previous
       )
       INSERT INTO lessons
-        (id, legacy_id, scope, text, text_key, evidence, basis, source_harness, source_session,
+        (id, scope, text, text_key, evidence, basis, source_harness, source_session,
          created_at, updated_at, revision, archived, archived_at, supersedes_id)
-      SELECT old.new_id, old.id, old.scope, old.text, old.text_key, old.evidence, old.basis,
+      SELECT old.new_id, old.scope, old.text, old.text_key, old.evidence, old.basis,
         old.source_harness, old.source_session, old.created_at, old.updated_at, old.revision, old.archived,
-        ${version === 3 ? "old.archived_at, predecessor.new_id" : "NULL, NULL"}
+        ${version >= 3 ? "old.archived_at, predecessor.new_id" : "NULL, NULL"}
       FROM numbered AS old
-      ${version === 3 ? "LEFT JOIN numbered AS predecessor ON predecessor.id = old.supersedes_id" : ""};
+      ${version >= 3 ? "LEFT JOIN numbered AS predecessor ON predecessor.id = old.supersedes_id" : ""};
       DROP TABLE lessons_previous;
     `);
-    // Preserve all old metadata; v1/v2 archive dates remain unknown (NULL).
+    // Preserve lesson metadata; v1/v2 archive dates remain unknown (NULL).
     this.db.exec(`
       CREATE UNIQUE INDEX lessons_active_text ON lessons(scope, text_key) WHERE archived = 0;
       CREATE INDEX lessons_recall ON lessons(scope, archived, created_at DESC, id);
       CREATE TRIGGER lessons_immutable BEFORE UPDATE OF
-        id, legacy_id, scope, text, text_key, evidence, basis, source_harness, source_session,
+        id, scope, text, text_key, evidence, basis, source_harness, source_session,
         created_at, updated_at, revision, supersedes_id ON lessons
       BEGIN SELECT RAISE(ABORT, 'Lesson content is immutable; supersede it instead'); END;
       CREATE TRIGGER lessons_archive_only BEFORE UPDATE OF archived, archived_at ON lessons
@@ -174,7 +172,6 @@ export class MemoryStore {
       -- WITHOUT ROWID removes hidden-key conflicts; guard every remaining REPLACE conflict explicitly.
       CREATE TRIGGER lessons_no_replace BEFORE INSERT ON lessons
       WHEN EXISTS (SELECT 1 FROM lessons WHERE id = NEW.id)
-        OR (NEW.legacy_id IS NOT NULL AND EXISTS (SELECT 1 FROM lessons WHERE legacy_id = NEW.legacy_id))
         OR (NEW.archived = 0 AND EXISTS (
           SELECT 1 FROM lessons WHERE scope = NEW.scope AND text_key = NEW.text_key AND archived = 0))
         OR (NEW.supersedes_id IS NOT NULL AND EXISTS (
@@ -218,18 +215,8 @@ export class MemoryStore {
     if (origin.session !== null) checkedText(origin.session, "source session", 160);
   }
 
-  get(scope: string, id: LessonId): Lesson {
+  get(scope: string, id: number): Lesson {
     this.checkScope(scope);
-    if (typeof id === "string") {
-      const reference = checkedText(id, "id", 80);
-      if (/^#?[1-9]\d*$/.test(reference)) {
-        id = Number(reference.replace(/^#/, ""));
-      } else {
-        const old = this.db.prepare("SELECT * FROM lessons WHERE scope = ? AND legacy_id = ?").get(scope, reference);
-        if (!old) throw new Error("Lesson not found in this project");
-        return lesson(old);
-      }
-    }
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
     const row = this.db.prepare("SELECT * FROM lessons WHERE scope = ? AND id = ?").get(scope, id);
     if (!row) throw new Error("Lesson not found in this project");
@@ -295,7 +282,7 @@ export class MemoryStore {
   }
 
   /** Create a successor and retire its predecessor together, retaining all original content and provenance. */
-  supersede(scope: string, id: LessonId, input: NewLesson, origin: Origin): Lesson {
+  supersede(scope: string, id: number, input: NewLesson, origin: Origin): Lesson {
     const checked = checkNew(input, this.limits);
     this.checkOrigin(origin);
     return this.transaction(() => {
@@ -310,7 +297,7 @@ export class MemoryStore {
     });
   }
 
-  archive(scope: string, id: LessonId): Lesson {
+  archive(scope: string, id: number): Lesson {
     return this.transaction(() => {
       const current = this.get(scope, id);
       if (current.archived) return current;
