@@ -70,16 +70,19 @@ Defaults, in `<Pi agent directory>/pi-mem.json` (normally `~/.pi/agent/pi-mem.js
   "databasePath": "memory.sqlite3",
   "maxLessonWords": 20,
   "maxEvidenceWords": 20,
-  "maxRecallLessons": 30
+  "maxRecallLessons": 30,
+  "maxRecallBytes": 8192
 }
 ```
 
 `PI_MEMORY_DB` overrides the database path. Relative paths resolve against the Pi agent directory, **not the project**; `~` expands to the home directory and `PI_CODING_AGENT_DIR` is respected. Project-local configuration cannot redirect storage. Changing paths selects another store; it does not move data. Run `/memory reload` after configuration changes.
 
-Limits must be positive safe integers. Words are whitespace-separated; overlong saves fail rather than truncate. Text/evidence also have hard caps of 1,200/600 characters. Lowering limits does not rewrite existing lessons.
+Limits must be positive safe integers; `maxRecallBytes` must be at least **64** to fit the recall heading and omission notice. It counts UTF-8 bytes, not tokens. For 100 short lessons, `maxRecallLessons: 100` with `maxRecallBytes: 32768` (32 KiB) is a reasonable starting budget; unusually long lessons may still be omitted.
+
+Words are whitespace-separated; overlong saves fail rather than truncate. Text/evidence also have hard caps of 1,200/600 characters. Lowering limits does not rewrite existing lessons.
 
 - **Scope:** the canonical Git worktree root, or canonical cwd outside Git. Subdirectories share a worktree's lessons; separate worktrees/clones remain separate. There is no global or parent-project inheritance. Scope follows Pi's cwd, not a shell tool's `cd`.
-- **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load newest-created first, with stable ID tie-breaking, up to `maxRecallLessons` or **8 KiB**, whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
+- **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load newest-created first, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
 - **Archiving:** changes future database recall only. It cannot erase text already present elsewhere in a conversation or sent to a model.
 
 The injected SQLite block contains only the heading and lesson text with stable IDs:
@@ -92,7 +95,7 @@ PROJECT LESSONS
 
 Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/memory` UI, not automatic recall.
 
-This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/memory` marks loaded/omitted lessons; `/memory reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; long legacy output can be clipped).
+This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/memory` marks loaded/omitted lessons; `/memory reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
 ## Legacy files and imports
 

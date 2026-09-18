@@ -1,6 +1,6 @@
+import { DEFAULT_LIMITS } from "./limits.ts";
 import type { Lesson, Page, RecallPage } from "./store.ts";
 
-export const CONTEXT_BYTES = 8192;
 export const RESULT_BYTES = 16384;
 
 /** Render terminal controls and invisible formatting visibly in human-facing screens. */
@@ -24,7 +24,7 @@ export function clipped(text: string, bytes: number): string {
 }
 
 /** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(page: RecallPage): { text: string; loaded: number; loadedIds: number[] } {
+export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes): { text: string; loaded: number; loadedIds: number[] } {
   const rows: Array<Pick<Lesson, "id" | "text">> = [];
   const render = () => [
     "PROJECT LESSONS",
@@ -33,7 +33,7 @@ export function memoryContext(page: RecallPage): { text: string; loaded: number;
   ].join("\n");
   for (const row of page.lessons) {
     rows.push({ id: row.id, text: row.text });
-    if (Buffer.byteLength(render()) > CONTEXT_BYTES) {
+    if (Buffer.byteLength(render()) > maxBytes) {
       rows.pop();
       break;
     }

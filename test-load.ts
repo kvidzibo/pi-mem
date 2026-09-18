@@ -238,8 +238,17 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     assert.match(legacyRecall, /Legacy Markdown memory/);
     expectStatus(1, 3, sqliteRecall, 3); // Omitted lessons and separately recalled legacy text do not inflate token counts.
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: 64 }));
+    await command.handler("reload", ctx);
+    const byteLimitedRecall = (await event("context", { messages: [user] })).messages[0].content.split("\n\n")[0];
+    assert.equal(byteLimitedRecall, sqliteRecall, "the byte budget must apply even without a one-lesson count limit");
+    assert.ok(Buffer.byteLength(byteLimitedRecall) <= 64);
+    expectStatus(1, 3, byteLimitedRecall, 3);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
+    const restoredRecall = (await event("context", { messages: [user] })).messages[0].content.split("\n\n")[0];
+    assert.doesNotMatch(restoredRecall, /lessons omitted/);
+    expectStatus(3, 3, restoredRecall, 3);
     await command.handler("add Compact evidence works.", ctx);
     assert.match(notices.at(-1)!, /"status": "saved"/, "command evidence must fit the smallest supported limit");
     const compact = JSON.parse(notices.at(-1)!);
@@ -475,7 +484,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   process.env.PI_CODING_AGENT_DIR = directory;
   process.env.PI_MEMORY_DB = join(directory, "db.sqlite3");
   const config = join(directory, "pi-mem.json");
-  const settings = JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 1 });
+  const settings = JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 1, maxRecallBytes: 32768 });
   writeFileSync(config, settings);
   const project = join(directory, "project");
   mkdirSync(project);
@@ -582,7 +591,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Add lesson", text: "New menu lesson." },
       { title: "Review new lesson", choice: "Save" },
       { title: "Memory ·", choice: "Status & limits" },
-      { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 8 KiB/ },
+      { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 32 KiB/ },
       { title: "Memory ·" },
     );
     inputs.push("Seed 0.");
@@ -597,6 +606,21 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, 1,
       "only approved menu archives should add archive entries");
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
+
+    // Menu counts and per-lesson labels must honor bytes, not just the configured lesson count.
+    writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: 64 }));
+    await command.handler("reload", ctx);
+    steps.push(
+      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
+      { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
+        match: /\[loaded\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
+      { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits/ },
+      { title: "Browse / search", choice: "Back" },
+      { title: "Memory ·" },
+    );
+    await run();
+    writeFileSync(config, settings);
+    await command.handler("reload", ctx);
 
     // Display normalization must not turn unchanged whitespace into literal escapes or new wording.
     const whitespace = "Keep\toriginal\r\nwhitespace.";
