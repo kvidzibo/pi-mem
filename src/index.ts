@@ -84,9 +84,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
   }
 
   function snapshot(ctx: ExtensionContext) {
-    const { store, path, scope } = current(ctx);
+    const { store, path, scope, limits } = current(ctx);
     const page = store.recall(scope);
-    const result = memoryContext(page);
+    const result = memoryContext(page, limits.maxRecallBytes);
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
       const { added, superseded } = store.sessionCreations(scope, origin(ctx));

@@ -7,7 +7,7 @@ import { databasePath, memoryConfig } from "../src/config.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
 import { importMarkdown } from "../src/markdown.ts";
 import { runMemory } from "../src/operations.ts";
-import { boundedPage, CONTEXT_BYTES, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
+import { boundedPage, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
 import { MemoryStore } from "../src/store.ts";
 
 test("database path precedence is env, global extension config, then default; bad config fails visibly", (t) => {
@@ -91,6 +91,50 @@ test("recall count is configurable below and above 30 without changing list pagi
   assert.throws(() => memoryConfig(dir, {}), /maxRecallLessons must be a positive safe integer/);
 });
 
+test("recall byte budgets bound UTF-8 context without changing stored lessons", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-mem-recall-bytes-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallLessons: 100 }));
+  const defaults = memoryConfig(dir, {});
+  assert.equal(defaults.maxRecallBytes, 8192);
+  const db = new MemoryStore(defaults.databasePath, defaults);
+  t.after(() => db.close());
+  db.addMany(dir, Array.from({ length: 100 }, (_, i) => ({
+    text: `Lesson ${i}: ${"多".repeat(35)} — keep this representative short lesson.`,
+    evidence: "Verified.", basis: "user_request" as const,
+  })), { harness: "test", session: null });
+
+  const defaultRendered = memoryContext(db.recall(dir), defaults.maxRecallBytes);
+  assert.ok(Buffer.byteLength(defaultRendered.text) <= 8192);
+  assert.ok(defaultRendered.loaded < 100);
+  assert.match(defaultRendered.text, /\n\[\d+ lessons omitted\.\]$/);
+
+  writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallLessons: 100, maxRecallBytes: 32768 }));
+  const large = memoryConfig(dir, {});
+  const allRendered = memoryContext(db.recall(dir), large.maxRecallBytes);
+  assert.equal(allRendered.loaded, 100);
+  assert.equal(allRendered.loadedIds.length, 100);
+  assert.ok(Buffer.byteLength(allRendered.text) > 8192);
+  assert.ok(Buffer.byteLength(allRendered.text) <= large.maxRecallBytes);
+  assert.doesNotMatch(allRendered.text, /lessons omitted/);
+  assert.equal(db.list(dir).total, 100);
+
+  const bounded = memoryContext(db.recall(dir), 1024);
+  assert.ok(Buffer.byteLength(bounded.text) <= 1024);
+  assert.match(bounded.text, /^PROJECT LESSONS/);
+  assert.match(bounded.text, /lessons omitted\.]$/);
+  writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallBytes: 64 }));
+  const tiny = memoryContext(db.recall(dir), memoryConfig(dir, {}).maxRecallBytes);
+  assert.equal(tiny.loaded, 0);
+  assert.equal(tiny.text, "PROJECT LESSONS\n[100 lessons omitted.]");
+  assert.ok(Buffer.byteLength(tiny.text) <= 64);
+
+  for (const maxRecallBytes of [0, 63, 64.5, Number.MAX_SAFE_INTEGER + 1, "8192", null, true]) {
+    writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallBytes }));
+    assert.throws(() => memoryConfig(dir, {}), /maxRecallBytes.*64/);
+  }
+});
+
 test("recall and paged search stay byte-bounded without deleting excess lessons", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-recall-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -101,7 +145,7 @@ test("recall and paged search stay byte-bounded without deleting excess lessons"
     text: `${i}: ${"记".repeat(1100)}`, evidence: "证".repeat(500), basis: "user_request" as const,
   })), origin);
   const context = memoryContext(db.recall("/project"));
-  assert.ok(Buffer.byteLength(context.text) <= CONTEXT_BYTES);
+  assert.ok(Buffer.byteLength(context.text) <= DEFAULT_LIMITS.maxRecallBytes);
   assert.ok(context.loaded > 0 && context.loaded < 30);
   assert.match(context.text, /\n\[\d+ lessons omitted\.\]$/);
   assert.doesNotMatch(context.text, /evidence|JSON|scope|loaded|total|memory list|memory search|revision/);

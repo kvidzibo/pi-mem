@@ -5,7 +5,7 @@ import { legacyContext, legacyFiles } from "./legacy.ts";
 import type { MemoryLimits } from "./limits.ts";
 import { exportMarkdown, exportPath } from "./markdown.ts";
 import { lessonEditor, menuChoice, words } from "./menu-ui.ts";
-import { CONTEXT_BYTES, clipped, memoryContext, visible } from "./presentation.ts";
+import { clipped, memoryContext, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { checkNew, type Lesson, type MemoryStore, type Origin } from "./store.ts";
 
@@ -85,9 +85,9 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
   async function details(initialId: number) {
     const history = [initialId];
     while (history.length) {
-      const { store, scope } = access.current();
+      const { store, scope, limits } = access.current();
       const lesson = store.get(scope, history.at(-1)!);
-      const loaded = memoryContext(store.recall(scope)).loadedIds.includes(lesson.id);
+      const loaded = memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds.includes(lesson.id);
       const body = [
         lesson.text, "", `Evidence: ${lesson.evidence}`, "",
         `State: ${lesson.archived ? "archived (not recalled)" : loaded ? "active · loaded into recall" : "active · omitted by recall limits"}`,
@@ -123,13 +123,13 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     let query = "";
     let selected: string | undefined;
     while (true) {
-      const { store, scope } = access.current();
+      const { store, scope, limits } = access.current();
       let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
       if (!page.lessons.length && offset > 0) {
         offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
         page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
       }
-      const loaded = new Set(memoryContext(store.recall(scope)).loadedIds);
+      const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
       const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
         `${offset + index + 1}. [${archived ? "archived" : loaded.has(lesson.id) ? "loaded" : "omitted"}] ${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
       const body = [
@@ -166,12 +166,12 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     try {
       const { store, path, scope, limits } = access.current();
       const page = store.recall(scope);
-      const recalled = memoryContext(page);
+      const recalled = memoryContext(page, limits.maxRecallBytes);
       lines.push(`Project scope: ${JSON.stringify(scope)}`, `Database: ${JSON.stringify(path)}`,
         `Active: ${page.total} · Loaded: ${recalled.loaded} · Omitted: ${page.total - recalled.loaded}`,
         `Archived: ${store.list(scope, { state: "archived", limit: 1 }).total}`,
         `Lesson limit: ${limits.maxLessonWords} words · Evidence limit: ${limits.maxEvidenceWords} words`,
-        `Recall limit: ${limits.maxRecallLessons} lessons or ${CONTEXT_BYTES / 1024} KiB, whichever fills first.`,
+        `Recall limit: ${limits.maxRecallLessons} lessons or ${limits.maxRecallBytes / 1024} KiB, whichever fills first.`,
         "Recall uses newest-created lessons first. Omitted lessons remain stored.",
         "Limits are read-only here. Changing the database path selects another store; it does not move data.");
     } catch (error) { lines.push(`Memory unavailable: ${errorText(error)}`, "Reload memory retries initialization."); }
@@ -190,7 +190,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     try {
       state = access.current();
       const page = state.store.recall(state.scope);
-      const recalled = memoryContext(page);
+      const recalled = memoryContext(page, state.limits.maxRecallBytes);
       summary = `${page.total} active · ${recalled.loaded} loaded into context`;
       if (!page.total) summary += "\nNo lessons yet. Add a lesson or import Markdown.";
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
