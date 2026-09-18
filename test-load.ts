@@ -42,6 +42,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
+  const expectStatus = (loaded: number, total: number, text: string) => {
+    // Match Pi's documented character-count heuristic against the actual injected SQLite block.
+    const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
+    assert.equal(statuses.at(-1), `memory ${loaded}/${total} · ~${tokens} tok`);
+  };
   const event = async (name: string, value: object = {}) => {
     let result;
     for (const handler of extension?.handlers.get(name) ?? []) result = await handler(value, ctx);
@@ -53,6 +58,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.deepEqual([...extension.commands.keys()], ["memory"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
+    const emptyRecall = await event("context", { messages: [] });
+    expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
@@ -63,6 +70,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
+    assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
     const learned = JSON.parse((await execute({ ...input, basis: "validated_learning",
@@ -73,11 +81,13 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const user = { role: "user", content: "Continue", timestamp: 1 };
     let recall = await event("context", { messages: [user] });
     assert.match(recall.messages[0].content, /Test startup recall/);
+    expectStatus(2, 2, recall.messages[0].content);
     recall = await event("context", recall);
     assert.equal(recall.messages.length, 2, "repeated requests must not accumulate memory blocks");
     inspection.archive(ctx.cwd, saved.id);
     recall = await event("context", { messages: [user] });
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
+    expectStatus(1, 1, recall.messages[0].content);
     for (const action of ["get", "list", "search", "history", "update", "restore"]) {
       await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
     }
@@ -154,7 +164,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.match(notices.at(-1)!, /text exceeds 3 words/);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
-    assert.match((await event("context", { messages: [user] })).messages[0].content, /1 of 3 active lessons loaded/);
+    const limitedRecall = (await event("context", { messages: [user] })).messages[0].content;
+    assert.match(limitedRecall, /1 of 3 active lessons loaded/);
+    const [sqliteRecall, legacyRecall] = limitedRecall.split("\n\n");
+    assert.match(legacyRecall, /Legacy Markdown memory/);
+    expectStatus(1, 3, sqliteRecall); // Omitted lessons and separately recalled legacy text do not inflate this count.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
     await command.handler("add Compact evidence works.", ctx);
@@ -369,6 +383,171 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     assert.deepEqual(unexpectedDialogs, []);
     assert.deepEqual(readdirSync(project).filter((name) => name.startsWith(".pi-mem-backup-")), []);
     assert.equal(observer.list(project).total, 502);
+  } finally {
+    await event("session_shutdown");
+    observer?.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("memory menu browses privately, confirms retained writes, and cancels stale UI actions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-mem-menu-"));
+  const previous = { PI_MEMORY_DB: process.env.PI_MEMORY_DB, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+  process.env.PI_CODING_AGENT_DIR = directory;
+  process.env.PI_MEMORY_DB = join(directory, "db.sqlite3");
+  const config = join(directory, "pi-mem.json");
+  const settings = JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 1 });
+  writeFileSync(config, settings);
+  const project = join(directory, "project");
+  mkdirSync(project);
+  const notices: string[] = [];
+  const messages: Array<{ content: string }> = [];
+  type Step = { title: string; choice?: string; text?: string; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
+  const steps: Step[] = [];
+  const inputs: string[] = [];
+  let extension: Awaited<ReturnType<typeof load>>;
+  let observer: MemoryStore | undefined;
+  const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+  const { KeybindingsManager } = await import(pathToFileURL(join(dist, "core/keybindings.js")).href);
+  const keys = new KeybindingsManager({ "tui.select.confirm": "ctrl+y", "tui.select.cancel": "ctrl+x" });
+  const ctx = {
+    cwd: project, hasUI: true, mode: "tui",
+    sessionManager: { getSessionId: () => "menu-session", getSessionFile: () => undefined },
+    modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
+    ui: {
+      notify: (text: string) => notices.push(text), setStatus() {},
+      input: async () => { assert.ok(inputs.length, "unexpected input"); return inputs.shift(); },
+      select: async (title: string, choices: string[]) => {
+        assert.match(title, /^Save the reviewed lessons/);
+        return choices.at(-1);
+      },
+      custom: async (factory: any) => {
+        const step = steps.shift();
+        assert.ok(step, "unexpected custom UI");
+        let result: unknown;
+        let finished = false;
+        const tui = { terminal: { rows: 80 }, requestRender() {} };
+        const component = await factory(tui, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keys,
+          (value: unknown) => { result = value; finished = true; });
+        try {
+          const screen = () => component.render(220).join("\n");
+          assert.ok(screen().startsWith(step.title), `${step.title}: ${screen()}`);
+          if (step.match) assert.match(screen(), step.match);
+          if (step.text !== undefined) {
+            component.focused = true;
+            component.handleInput("\x01"); // Start of prefilled lesson.
+            component.handleInput("\x0b"); // Clear the line without changing the main Pi editor.
+            component.handleInput(`\x1b[200~${step.text}\x1b[201~`);
+            assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
+          }
+          const full = screen();
+          tui.terminal.rows = 12;
+          for (const width of [1, 12, 40]) {
+            assert.ok(component.render(width).every((line: string) => visibleWidth(line) <= width), full);
+          }
+          tui.terminal.rows = 80;
+          component.invalidate();
+          if (step.choice) {
+            for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && line.includes(step.choice!)); count++) {
+              assert.ok(count < 40, `choice ${step.choice} not found: ${screen()}`);
+              component.handleInput("\x1b[B");
+            }
+          }
+          await step.before?.();
+          if (!finished) component.handleInput(step.text !== undefined || step.submit ? "\r" : step.choice === undefined ? "\x18" : "\x19");
+          assert.equal(finished, true, `UI did not close: ${step.title}`);
+          return result;
+        } finally { component.dispose?.(); }
+      },
+    },
+  };
+  const event = async (name: string) => {
+    for (const handler of extension?.handlers.get(name) ?? []) await handler({}, ctx);
+  };
+  try {
+    extension = await load();
+    extension.runtime.sendMessage = (message: { content: string }) => messages.push(message);
+    await event("session_start");
+    observer = new MemoryStore(process.env.PI_MEMORY_DB);
+    observer.addMany(project, Array.from({ length: 12 }, (_, i) => ({ text: `Seed ${i}.`, evidence: "Verified.", basis: "user_request" as const })),
+      { harness: "test", session: "seed-session" });
+    const original = observer.list(project, { query: "Seed 0." }).lessons[0];
+    const command = extension.commands.get("memory");
+    const run = async () => {
+      await command.handler("", ctx);
+      assert.equal(steps.length, 0, `unreached menu steps; notices: ${notices.join("\n\n")}`);
+      assert.equal(inputs.length, 0);
+    };
+    steps.push(
+      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
+      { title: "Browse / search", choice: "Next page", match: /1–10 of 12/ },
+      { title: "Browse / search", choice: "Search…", match: /11–12 of 12[\s\S]*\[omitted\]/ },
+      { title: "Browse / search", choice: "Seed 0.", match: /Search: Seed 0\./ },
+      { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
+      { title: "Replace lesson", text: "Seed 0. Corrected.", match: /2\/5 words/ },
+      { title: "Review replacement", choice: "Cancel", match: /BEFORE\nSeed 0\.\n\nAFTER\nSeed 0\. Corrected\./ },
+      { title: "Lesson details", choice: "Replace…", before: () => { assert.equal(observer!.get(project, original.id).archived, false); } },
+      { title: "Replace lesson", text: "Seed 0. Corrected." },
+      { title: "Review replacement", choice: "Save" },
+      { title: "Browse / search", choice: "Seed 0. Corrected.", match: /Search: Seed 0\./ },
+      { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: ${original.id}`) },
+      { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
+      { title: "Lesson details", choice: "Archive…" },
+      { title: "Archive lesson?", choice: "Cancel", match: /future recall[\s\S]*already in a conversation/ },
+      { title: "Lesson details", choice: "Archive…" },
+      { title: "Archive lesson?", choice: "Archive" },
+      { title: "Browse / search", choice: "Back", match: /No lessons found/ },
+      { title: "Memory ·", choice: "Add lesson" },
+      { title: "Add lesson", text: "These six words exceed the limit." },
+      { title: "Add lesson", text: "New menu lesson." },
+      { title: "Review new lesson", choice: "Save" },
+      { title: "Memory ·", choice: "Status & limits" },
+      { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 8 KiB/ },
+      { title: "Memory ·" },
+    );
+    inputs.push("Seed 0.");
+    await run();
+    assert.ok(notices.some((text) => /text exceeds 5 words/.test(text)));
+    assert.equal(observer.get(project, original.id).archived, true);
+    assert.equal(observer.list(project, { state: "archived" }).total, 2);
+    assert.equal(observer.list(project, { query: "New menu lesson." }).lessons[0].basis, "user_request");
+    assert.equal(messages.length, 0, "browsing and user writes must not inject transcript messages");
+
+    // Display normalization must not turn unchanged whitespace into literal escapes or new wording.
+    const whitespace = "Keep\toriginal\r\nwhitespace.";
+    observer.add(project, { text: whitespace, evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null });
+    steps.push({ title: "Memory ·", choice: "Browse / search lessons" }, { title: "Browse / search", choice: "Search…" },
+      { title: "Browse / search", choice: "Keep original whitespace." }, { title: "Lesson details", choice: "Replace…" },
+      { title: "Replace lesson", submit: true, match: /3\/5 words/ }, { title: "Review replacement", choice: "Save" },
+      { title: "Browse / search", choice: "Back" }, { title: "Memory ·" });
+    inputs.push("Keep");
+    await run();
+    assert.equal(observer.list(project, { query: "Keep" }).lessons[0].text, whitespace);
+    assert.equal(notices.some((text) => /characters are escaped/.test(text)), false, "ordinary whitespace must not raise control-character warnings");
+
+    // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
+    const total = observer.list(project).total;
+    steps.push({ title: "Memory ·", choice: "Add lesson" }, { title: "Add lesson", text: "Must not save." },
+      { title: "Review new lesson", choice: "Save", before: async () => { await event("session_shutdown"); await event("session_start"); } });
+    await run();
+    assert.equal(observer.list(project).total, total);
+
+    // Initialization failures retain status/help/reload navigation and can recover in the same menu.
+    delete process.env.PI_MEMORY_DB;
+    writeFileSync(config, "invalid JSON");
+    await event("session_shutdown"); await event("session_start");
+    steps.push({ title: "Memory ·", choice: "Status & limits", match: /Memory unavailable/ },
+      { title: "Status & limits", choice: "Back", match: /Reload memory retries initialization/ },
+      { title: "Memory ·", choice: "Reload memory", before: () => { writeFileSync(config, settings); } },
+      { title: "Memory ·", match: /0 active · 0 loaded/ });
+    await run();
+    ctx.hasUI = false; ctx.mode = "print";
+    await command.handler("", ctx);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0].content, /Database:[\s\S]*0 of 0 active lessons loaded/);
   } finally {
     await event("session_shutdown");
     observer?.close();

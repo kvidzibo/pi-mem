@@ -26,11 +26,21 @@ The agent's `memory` tool exposes only:
 
 There are no agent read/search/history actions. An archived record cannot be superseded or restored. Adding the same normalized text as an active lesson returns its existing ID; adding archived wording creates a new record. Superseding rejects text already held by another active lesson without changing either record.
 
-Human commands remain available:
+Run **`/memory`** to open the project menu in TUI or RPC mode:
+
+- Browse/search active or archived lessons; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
+- Add lessons, review replacements, or confirm archiving. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- Import/export Markdown, inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
+
+Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls; import drafting is the existing explicit exception. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
+
+The footer shows `memory loaded/active · ~N tok`. Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—including evidence, IDs, and headers—but excludes omitted/archived lessons and legacy `MEMORY.md`.
+
+Direct commands remain available; without UI, `/memory` retains its text status output:
 
 | Command | Purpose |
 |---|---|
-| `/memory` | Show database path, project scope, and loaded lessons |
+| `/memory` | Open the project memory menu; text status without UI |
 | `/memory add <lesson>` | Save a lesson explicitly |
 | `/memory supersede <id> <lesson>` | Create a replacement and archive the original |
 | `/memory archive <id>` | Archive without deleting |

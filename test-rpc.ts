@@ -43,10 +43,23 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
   let allowImport = false;
   let reviewed = 0;
   let removalOffers = 0;
+  let browseMenu = false;
+  let browseRootSeen = false;
+  let detailDone = false;
+  let menuClosed: (() => void) | undefined;
+  let adding = false;
+  let inputOpened: (() => void) | undefined;
+  let staleInputId: string | undefined;
   const listen = () => client.onEvent((event: Event) => {
     events.push(event);
     if (event.type !== "extension_ui_request") return;
     let value: string | undefined;
+    if (event.method === "input" && adding) {
+      assert.match(event.title!, /^Add lesson/);
+      staleInputId = event.id;
+      inputOpened?.();
+      return; // Leave this input pending, then abort it through /memory reload.
+    }
     if (event.method === "editor") {
       assert.match(event.prefill!, /Source: .*MEMORY.md/);
       assert.match(event.prefill!, /Database:/);
@@ -56,7 +69,31 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
       reviewed++;
       value = event.prefill;
     } else if (event.method === "select") {
-      if (event.title!.startsWith("Save")) {
+      if (adding && event.title?.startsWith("Memory ·")) {
+        value = "Add lesson";
+      } else if (browseMenu && event.title?.startsWith("Memory ·")) {
+        assert.match(event.title, /Memory · (project|other)/);
+        if (browseRootSeen) {
+          client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
+          menuClosed?.();
+          return;
+        }
+        browseRootSeen = true;
+        assert.equal(event.options?.length, 8);
+        assert.deepEqual(event.options?.slice(0, 5), ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…"]);
+        value = "Browse / search lessons";
+      } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
+        if (detailDone) value = "Back";
+        else {
+          assert.ok(event.options?.some((option) => option.includes("A verified lesson from the RPC smoke test")));
+          value = event.options!.find((option) => option.includes("A verified lesson from the RPC smoke test"));
+        }
+      } else if (browseMenu && event.title?.startsWith("Lesson details")) {
+        assert.match(event.title, /A verified lesson from the RPC smoke test/);
+        detailDone = true;
+        client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
+        return;
+      } else if (event.title!.startsWith("Save")) {
         assert.equal(event.options![0], "Cancel");
         value = allowImport ? event.options!.at(-1) : event.options![0];
       } else {
@@ -88,7 +125,38 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     const before = await client.getState();
     assert.equal((await client.newSession()).cancelled, false);
     assert.notEqual((await client.getState()).sessionId, before.sessionId);
-    assert.match(await command("/memory"), /A verified lesson from the RPC smoke test/);
+    const messagesBeforeBrowse = await client.getMessages();
+    browseMenu = true;
+    browseRootSeen = false;
+    detailDone = false;
+    const closed = new Promise<void>((resolve) => { menuClosed = resolve; });
+    await client.prompt("/memory");
+    await closed; // Prompt acceptance is not completion of an extension's dialog sequence.
+    browseMenu = false;
+    const messagesAfterBrowse = await client.getMessages();
+    assert.deepEqual(messagesAfterBrowse, messagesBeforeBrowse, "browsing must not add messages");
+    assert.equal(events.filter((event) => event.type === "agent_start").length, 0);
+    assert.match(events.find((event) => event.title?.startsWith("Lesson details"))?.title ?? "", /A verified lesson from the RPC smoke test/);
+
+    // A pending RPC lesson input must unwind on reload without blocking or overlapping a later menu.
+    adding = true;
+    const opened = new Promise<void>((resolve) => { inputOpened = resolve; });
+    const pendingAdd = client.prompt("/memory");
+    await opened;
+    assert.ok(staleInputId);
+    await command("/memory reload");
+    await pendingAdd;
+    adding = false;
+    browseMenu = true;
+    browseRootSeen = true;
+    const reopened = new Promise<void>((resolve) => { menuClosed = resolve; });
+    await client.prompt("/memory");
+    await reopened;
+    browseMenu = false;
+    client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: staleInputId, value: "Must not save stale text." }) + "\n");
+    assert.equal(JSON.parse(await command("/memory search Must not save stale text.")).total, 0);
+    assert.equal(JSON.parse(await command("/memory list")).total, 1);
+    assert.deepEqual(await client.getMessages(), messagesBeforeBrowse);
     await client.stop();
     client = new RpcClient({ ...options, cwd: project });
     listen();
@@ -109,7 +177,17 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     client = new RpcClient({ ...options, cwd: other });
     listen();
     await client.start();
-    const recalled = await command("/memory");
+    browseMenu = true;
+    browseRootSeen = true;
+    const emptyClosed = new Promise<void>((resolve) => { menuClosed = resolve; });
+    await client.prompt("/memory");
+    await emptyClosed;
+    browseMenu = false;
+    const emptyMenu = events.find((event) => event.method === "select" && event.title?.startsWith("Memory · other"));
+    assert.ok(emptyMenu);
+    assert.match(emptyMenu!.title!, /0 active · 0 loaded into context/);
+    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…", "Status & limits", "Reload memory", "Help"]);
+    const recalled = await command("/memory reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
     assert.match(recalled, /0 of 0 active lessons/);
     assert.equal(events.filter((event) => event.type === "agent_start" || event.type === "extension_error").length, 0);

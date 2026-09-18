@@ -1,8 +1,9 @@
-import { getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { estimateTokens, getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
-import type { MemoryLimits } from "./limits.ts";
+import { memoryMenu, type MenuState } from "./menu.ts";
 import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
@@ -14,7 +15,7 @@ import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Origin } from "./store.ts";
 const CONTEXT_TYPE = "pi-mem-context";
 const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
-  "/memory — database, project and loaded lessons",
+  "/memory — open the project memory menu (text status without UI)",
   "/memory list [offset] | archived [offset] | search <text> | get <id>",
   "/memory add <lesson> | supersede <id> <lesson> | archive <id>",
   "/memory import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
@@ -23,15 +24,18 @@ const HELP = [
 ].join("\n");
 
 export default function memoryExtension(pi: ExtensionAPI) {
-  let state: { store: MemoryStore; path: string; scope: string; cwd: string; limits: Readonly<MemoryLimits> } | undefined;
+  let state: MenuState | undefined;
   let failed: Error | undefined;
   let notified: string | undefined;
   let legacyNotified: string | undefined;
   let importing: AbortController | undefined;
+  let menu: AbortController | undefined;
   let generation = 0;
 
   function reset() {
     generation++;
+    menu?.abort(new Error("Session or memory configuration changed; menu closed"));
+    // Keep the guard until the old command unwinds, including pending import dialogs.
     importing?.abort(new Error("Session or memory configuration changed; import cancelled"));
     importing = undefined;
     legacyNotified = undefined;
@@ -67,7 +71,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const { store, scope } = current(ctx);
     const page = store.recall(scope);
     const result = memoryContext(scope, page);
-    if (ctx.hasUI) ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}`);
+    if (ctx.hasUI) {
+      const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
+      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total} · ~${tokens.toLocaleString("en-US")} tok`);
+    }
     notified = undefined;
     return result;
   }
@@ -109,6 +116,74 @@ export default function memoryExtension(pi: ExtensionAPI) {
       legacyNotified = warning;
     }
     return parts.join("\n\n");
+  }
+
+  async function importFile(file: string, ctx: ExtensionContext) {
+    if (importing) throw new Error("An import is already in progress; cancel it or use /memory reload");
+    const { store, path, scope, limits } = current(ctx);
+    const source = origin(ctx);
+    const controller = new AbortController();
+    importing = controller;
+    const started = generation;
+    const cwd = ctx.cwd;
+    const check = () => {
+      controller.signal.throwIfAborted();
+      if (generation !== started || state?.store !== store || state.scope !== scope || ctx.cwd !== cwd ||
+          ctx.sessionManager.getSessionId() !== source.session || projectScope(cwd) !== scope) {
+        throw new Error("Session or project changed; import cancelled");
+      }
+    };
+    try {
+      const result = await reviewedImport(ctx, { store, path, scope, cwd, limits,
+        file, origin: source, signal: controller.signal, check });
+      if (generation === started) {
+        // Imports require UI. Preserve all lesson IDs and hashes, even after a large batch.
+        ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved.", "info");
+        try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
+      }
+    } finally {
+      if (importing === controller) importing = undefined;
+    }
+  }
+
+  async function openMenu(ctx: ExtensionContext) {
+    if (menu || importing) throw new Error("A memory menu or import is already open; close it first");
+    while (true) {
+      const controller = new AbortController();
+      menu = controller;
+      const started = generation;
+      const cwd = ctx.cwd;
+      const source = origin(ctx);
+      const check = () => {
+        controller.signal.throwIfAborted();
+        if (generation !== started || ctx.cwd !== cwd || ctx.sessionManager.getSessionId() !== source.session) {
+          throw new Error("Session or project changed; memory menu closed");
+        }
+      };
+      let action;
+      try {
+        action = await memoryMenu(ctx, {
+          current: () => {
+            check();
+            const value = current(ctx);
+            if (projectScope(cwd) !== value.scope) throw new Error("Project scope changed; reload memory before continuing");
+            return value;
+          },
+          check, signal: controller.signal, origin: source, configPath: join(getAgentDir(), "pi-mem.json"), help: HELP,
+          refresh: () => { try { snapshot(ctx); } catch (error) { unavailable(error, ctx); } },
+          importFile: (file) => { check(); return importFile(file, ctx); },
+        });
+        check();
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        throw error;
+      } finally {
+        if (menu === controller) menu = undefined;
+      }
+      if (action !== "reload") return;
+      reset();
+      try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
+    }
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -171,7 +246,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("memory", {
-    description: "Inspect, save, search, supersede, archive, import or export project lessons",
+    description: "Open the project memory menu, or use lesson subcommands",
     getArgumentCompletions(prefix) {
       return COMMANDS.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
     },
@@ -179,6 +254,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       try {
         const [command, rest] = firstWord(args);
         if (command === "help") { show(HELP, ctx); return; }
+        if (!command && ctx.hasUI) { await openMenu(ctx); return; }
         if (command === "reload") reset();
         const { store, path, scope } = current(ctx);
         const source = origin(ctx);
@@ -187,30 +263,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
           return;
         }
         if (command === "import") {
-          if (importing) throw new Error("An import is already in progress; cancel it or use /memory reload");
+          if (menu) throw new Error("A memory menu is already open; close it before running an import command");
           const files = rest ? [rest] : legacyFiles(ctx.cwd);
           if (files.length !== 1) throw new Error("Usage: /memory import <path> (select exactly one source)");
-          const controller = new AbortController();
-          importing = controller;
-          const started = generation;
-          const cwd = ctx.cwd;
-          const check = () => {
-            controller.signal.throwIfAborted();
-            if (generation !== started || state?.store !== store || state.scope !== scope || ctx.cwd !== cwd ||
-                ctx.sessionManager.getSessionId() !== source.session || projectScope(cwd) !== scope) {
-              throw new Error("Session or project changed; import cancelled");
-            }
-          };
-          try {
-            const result = await reviewedImport(ctx, { store, path, scope, cwd, limits: state!.limits,
-              file: files[0], origin: source, signal: controller.signal, check });
-            if (generation === started) {
-              // Imports require UI. Preserve all lesson IDs and hashes, even after a large batch.
-              ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved.", "info");
-            }
-          } finally {
-            if (importing === controller) importing = undefined;
-          }
+          await importFile(files[0], ctx);
         } else if (command === "export") {
           if (!rest) throw new Error("Usage: /memory export <new-path>");
           const output = exportPath(scope, ctx.cwd, rest);
