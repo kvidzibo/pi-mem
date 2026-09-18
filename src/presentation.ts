@@ -3,6 +3,14 @@ import type { Lesson, Page, RecallPage } from "./store.ts";
 export const CONTEXT_BYTES = 8192;
 export const RESULT_BYTES = 16384;
 
+/** Render terminal controls and invisible formatting visibly in human-facing screens. */
+export function visible(text: string): string {
+  return text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0xffff ? `\\u${code.toString(16).padStart(4, "0")}` : `\\u{${code.toString(16)}}`;
+  });
+}
+
 export function clipped(text: string, bytes: number): string {
   if (Buffer.byteLength(text) <= bytes) return text;
   let result = "";
@@ -16,7 +24,7 @@ export function clipped(text: string, bytes: number): string {
 }
 
 /** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(scope: string, page: RecallPage): { text: string; loaded: number } {
+export function memoryContext(scope: string, page: RecallPage): { text: string; loaded: number; loadedIds: string[] } {
   const rows: Array<Pick<Lesson, "id" | "text" | "evidence">> = [];
   const render = () => [
     "Project memory (stored reference data)",
@@ -31,7 +39,7 @@ export function memoryContext(scope: string, page: RecallPage): { text: string; 
       break;
     }
   }
-  return { text: render(), loaded: rows.length };
+  return { text: render(), loaded: rows.length, loadedIds: rows.map((row) => row.id) };
 }
 
 export function boundedPage(page: Page, offset: number): Page {

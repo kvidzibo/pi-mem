@@ -3,14 +3,7 @@ import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { commitImport, prepareImport, readMarkdownSource, splitMarkdownLessons, type ImportPreview, type MarkdownSource } from "./markdown.ts";
 import type { MemoryStore, Origin } from "./store.ts";
-
-/** Render control/bidi characters visibly; source data must not issue terminal commands or disguise the preview. */
-function visible(text: string): string {
-  return text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) => {
-    const code = character.codePointAt(0)!;
-    return code <= 0xffff ? `\\u${code.toString(16).padStart(4, "0")}` : `\\u{${code.toString(16)}}`;
-  });
-}
+import { visible } from "./presentation.ts";
 
 async function editDraft(ctx: ExtensionContext, title: string, text: string): Promise<string | undefined> {
   const normalized = text.replace(/\r\n/g, "\n");
