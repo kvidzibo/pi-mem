@@ -35,6 +35,10 @@ test("word limits bound new writes and atomic imports without changing existing 
   const text = Array.from({ length: 20 }, (_, i) => `word${i}`).join("\u2003\t\n");
   const input = { text, evidence: text, basis: "user_request" as const };
   const saved = db.add(dir, input, origin).lesson;
+  assert.equal(saved.id, 1);
+  const recalled = memoryContext(db.recall(dir));
+  assert.equal(recalled.text, `PROJECT LESSONS\n- ${text.replace(/\s+/gu, " ")} #1`);
+  assert.deepEqual(recalled.loadedIds, [saved.id]);
   assert.throws(() => db.add(dir, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
   assert.throws(() => db.add(dir, { ...input, evidence: text + " extra" }, origin), /evidence exceeds 20 words/);
   assert.throws(() => db.supersede(dir, saved.id, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
@@ -49,6 +53,8 @@ test("word limits bound new writes and atomic imports without changing existing 
   assert.equal(custom.maxLessonWords, 21, "a database override must not discard valid word settings");
   db = new MemoryStore(custom.databasePath, custom);
   const longer = db.add(dir, { ...input, text: text + " extra", evidence: "Verified." }, origin).lesson;
+  assert.deepEqual(db.get(dir, saved.id), saved, "adding another lesson must not change the existing ID or text");
+  assert.ok(memoryContext(db.recall(dir)).text.includes(`\n- ${text.replace(/\s+/gu, " ")} #${saved.id}`));
   assert.throws(() => db.add(dir, { ...input, evidence: "Two words" }, origin), /evidence exceeds 1 words/);
   db.close();
   db = new MemoryStore(defaults.databasePath);
@@ -70,13 +76,13 @@ test("recall count is configurable below and above 30 without changing list pagi
   db.addMany(dir, Array.from({ length: 31 }, (_, i) => ({
     text: `Lesson ${i}.`, evidence: "Verified.", basis: "user_request" as const,
   })), { harness: "test", session: null });
-  assert.equal(memoryContext(dir, db.recall(dir)).loaded, 30);
+  assert.equal(memoryContext(db.recall(dir)).loaded, 30);
   for (const maxRecallLessons of [2, 31]) {
     db.close();
     writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallLessons }));
     const config = memoryConfig(dir, {});
     db = new MemoryStore(config.databasePath, config);
-    const recalled = memoryContext(dir, db.recall(dir));
+    const recalled = memoryContext(db.recall(dir));
     assert.equal(recalled.loaded, maxRecallLessons);
     assert.equal(db.list(dir).lessons.length, 30);
     assert.equal(db.list(dir).total, 31);
@@ -94,12 +100,12 @@ test("recall and paged search stay byte-bounded without deleting excess lessons"
   db.addMany("/project", Array.from({ length: 31 }, (_, i) => ({
     text: `${i}: ${"记".repeat(1100)}`, evidence: "证".repeat(500), basis: "user_request" as const,
   })), origin);
-  const context = memoryContext("/project", db.recall("/project"));
+  const context = memoryContext(db.recall("/project"));
   assert.ok(Buffer.byteLength(context.text) <= CONTEXT_BYTES);
   assert.ok(context.loaded > 0 && context.loaded < 30);
-  assert.match(context.text, /Omitted lessons remain stored/);
-  assert.doesNotMatch(context.text, /memory list|memory search|revision/);
-  const ids = new Set<string>();
+  assert.match(context.text, /\n\[\d+ lessons omitted\.\]$/);
+  assert.doesNotMatch(context.text, /evidence|JSON|scope|loaded|total|memory list|memory search|revision/);
+  const ids = new Set<number>();
   let offset: number | null = 0;
   do {
     const page = boundedPage(db.list("/project", { query: "记", offset }), offset);

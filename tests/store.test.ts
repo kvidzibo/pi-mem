@@ -23,6 +23,8 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   t.after(() => db.close());
   const saved = db.add("/projects/a", input, source);
   assert.equal(saved.created, true);
+  assert.equal(saved.lesson.id, 1);
+  assert.equal("legacy_id" in saved.lesson, false);
   assert.deepEqual(db.add("/projects/a", { ...input, text: "Use  the project-local\nenvironment." }, source),
     { ...saved, created: false });
   assert.equal(db.list("/projects/ab").total, 0);
@@ -60,72 +62,115 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-for (const version of [1, 2]) test(`schema ${version} upgrades preserve all legacy data and use creation-order recall`, (t) => {
+for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUIDs while retaining lessons, integer history and recall order`, (t) => {
   const path = temporary(t);
   const legacy = new DatabaseSync(path);
+  t.after(() => legacy.close());
   legacy.exec(`
+    PRAGMA foreign_keys = ON;
     CREATE TABLE lessons (
-      id TEXT PRIMARY KEY,
+      id ${version === 4 ? "INTEGER" : "TEXT"} PRIMARY KEY,
+      ${version === 4 ? "legacy_id TEXT UNIQUE," : ""}
       scope TEXT NOT NULL,
       text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1200),
       text_key TEXT NOT NULL,
       evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND 600),
-      basis TEXT NOT NULL CHECK(basis IN ('validated_fix', 'user_request', 'import'${version === 2 ? ", 'validated_learning'" : ""})),
+      basis TEXT NOT NULL CHECK(basis IN ('validated_fix', 'user_request', 'import'${version >= 2 ? ", 'validated_learning'" : ""})),
       source_harness TEXT NOT NULL,
       source_session TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       revision INTEGER NOT NULL DEFAULT 1,
       archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
-      UNIQUE(scope, text_key)
-    );
+      ${version >= 3 ? `archived_at INTEGER, supersedes_id ${version === 4 ? "INTEGER" : "TEXT"} UNIQUE REFERENCES lessons(id)` : "UNIQUE(scope, text_key)"}
+    ) ${version >= 3 ? "WITHOUT ROWID" : ""};
     CREATE INDEX lessons_recall ON lessons(scope, archived, updated_at DESC, id);
     PRAGMA application_id = ${0x504d454d};
     PRAGMA user_version = ${version};
   `);
-  const bases = ["validated_fix", "user_request", "import", ...(version === 2 ? ["validated_learning"] : [])];
+  const bases = ["validated_fix", "user_request", "import", ...(version >= 2 ? ["validated_learning"] : [])];
+  const uuids = bases.map((_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`);
+  const ids = version === 4 ? [41, 7, 99, 3] : uuids;
   for (const [i, basis] of bases.entries()) {
     const text = `Legacy ${basis} lesson.`;
-    legacy.prepare("INSERT INTO lessons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-      `old-${i}`, "/project", text, createHash("sha256").update(text).digest("hex"), "Previously verified.",
-      basis, "legacy", i === 0 ? null : "old-session", 100 + i, 300 - i, 3 + i, i === 0 ? 1 : 0,
+    legacy.prepare(`INSERT INTO lessons
+      (id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, revision, archived)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      ids[i], version >= 3 && i === 3 ? "/other" : "/project", text,
+      createHash("sha256").update(text).digest("hex"), "Previously verified.",
+      basis, "legacy", i === 0 ? null : "old-session", 100 + i, 300 - i, 3 + i,
+      i === 0 || (version >= 3 && i === 1) ? 1 : 0,
     );
+    if (version >= 3) legacy.prepare("UPDATE lessons SET archived_at = ?, supersedes_id = ? WHERE id = ?")
+      .run(i < 2 ? 150 + i : null, i === 1 || i === 2 ? ids[i - 1] : null, ids[i]);
+    if (version === 4) legacy.prepare("UPDATE lessons SET legacy_id = ? WHERE id = ?").run(uuids[i], ids[i]);
   }
-  const original = legacy.prepare("SELECT * FROM lessons ORDER BY id").all();
-  t.after(() => legacy.close());
+  if (version >= 3) legacy.exec(`
+    CREATE UNIQUE INDEX lessons_active_text ON lessons(scope, text_key) WHERE archived = 0;
+    CREATE TRIGGER lessons_immutable BEFORE UPDATE OF text ON lessons
+      BEGIN SELECT RAISE(ABORT, 'immutable'); END;
+    CREATE TRIGGER lessons_no_delete BEFORE DELETE ON lessons
+      BEGIN SELECT RAISE(ABORT, 'cannot be deleted'); END;
+  `);
+  const original = legacy.prepare("SELECT * FROM lessons ORDER BY created_at, id").all();
+  const mapping = new Map(original.map((row, i) => [row.id, version === 4 ? Number(row.id) : i + 1]));
+  const expected = original.map(({ legacy_id: _discarded, ...row }) => ({ ...row, id: mapping.get(row.id)!,
+    archived_at: row.archived_at ?? null, supersedes_id: row.supersedes_id ? mapping.get(row.supersedes_id) : null }))
+    .sort((a, b) => a.id - b.id);
+  const firstId = mapping.get(ids[0])!;
+  const secondId = mapping.get(ids[1])!;
 
   let db = new MemoryStore(path);
   t.after(() => db.close());
   const migrated = new DatabaseSync(path);
   try {
-    assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all().map((row) => ({ ...row })),
-      original.map((row) => ({ ...row, archived_at: null, supersedes_id: null })));
-    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 3);
+    assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all().map((row) => ({ ...row })), expected);
+    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 5);
+    assert.equal(migrated.prepare("PRAGMA table_info(lessons)").all().some((column) => column.name === "legacy_id"), false);
+    for (const uuid of uuids) assert.equal(JSON.stringify(expected).includes(uuid), false);
     assert.equal(migrated.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
     assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
     assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_recall'").get());
     assert.equal(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_previous'").get(), undefined);
-    assert.throws(() => legacy.exec("UPDATE lessons SET text = 'Old client overwrite' WHERE id = 'old-1'"), /immutable/);
-    assert.throws(() => legacy.exec("UPDATE lessons SET archived = 0 WHERE id = 'old-0'"), /active-to-archived/);
+    assert.throws(() => legacy.prepare("UPDATE lessons SET text = 'Old client overwrite' WHERE id = ?").run(secondId), /immutable/);
+    assert.throws(() => legacy.prepare("UPDATE lessons SET archived = 0 WHERE id = ?").run(firstId), /active-to-archived/);
+    assert.throws(() => legacy.exec(`INSERT INTO lessons
+      (id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at)
+      VALUES ('old-client-uuid', '/project', 'Old client.', 'new-key', 'Verified.', 'user_request', 'test', 1, 1)`),
+      /CHECK constraint/, "an already-open old client cannot insert UUIDs after migration");
   } finally {
     migrated.close();
   }
+  for (const row of original) {
+    const id = mapping.get(row.id)!;
+    assert.equal(db.get(String(row.scope), id).text, row.text);
+    // Exercise stale untyped callers: neither old UUID primary keys nor v4 aliases may resolve.
+    const uuid = (version === 4 ? row.legacy_id : row.id) as unknown as number;
+    assert.throws(() => db.get(String(row.scope), uuid), /positive safe integer/);
+    assert.throws(() => db.archive(String(row.scope), uuid), /positive safe integer/);
+    assert.throws(() => db.supersede(String(row.scope), uuid, input, source), /positive safe integer/);
+    assert.throws(() => db.get("/missing", id), /not found in this project/);
+  }
   assert.deepEqual([...db.recall("/project").lessons].map((row) => row.id),
-    bases.slice(1).map((_, i) => `old-${i + 1}`).reverse(), "creation time, not legacy updated time, determines recall");
-  const archived = db.get("/project", "old-0");
-  assert.equal(archived.archived_at, null, "migration must not invent an archive date");
+    original.filter((row) => row.scope === "/project" && row.archived === 0).reverse().map((row) => mapping.get(row.id)),
+    "creation time, not legacy updated time, determines recall");
+  const archived = db.get("/project", firstId);
+  assert.equal(archived.archived_at, version >= 3 ? 150 : null, "migration must preserve known/unknown archive dates");
   const fresh = db.add("/project", archived, source);
   assert.equal(fresh.created, true);
-  assert.notEqual(fresh.lesson.id, archived.id);
+  assert.equal(fresh.lesson.id, Math.max(...mapping.values()) + 1);
   assert.deepEqual(db.get("/project", archived.id), archived);
-  const learned = db.add("/project", { ...input, basis: "validated_learning" }, source).lesson;
-  const successor = db.supersede("/project", learned.id,
+  const predecessor = db.get("/project", mapping.get(ids[2])!);
+  const successor = db.supersede("/project", predecessor.id,
     { ...input, text: "Build assets before packaging.", basis: "validated_learning" }, source);
+  assert.equal(successor.supersedes_id, predecessor.id);
+  assert.equal(db.archive("/project", predecessor.id).id, predecessor.id);
   db.close();
   db = new MemoryStore(path);
   assert.deepEqual(db.get("/project", successor.id), successor);
   assert.equal(successor.basis, "validated_learning");
-  assert.equal(db.get("/project", learned.id).text, learned.text);
+  assert.equal(db.get("/project", predecessor.id).text, predecessor.text);
+  assert.deepEqual(db.get("/project", firstId), archived, "reopening must not renumber records");
 });
 
 test("two connections cannot supersede an archived predecessor or lose its content", (t) => {
@@ -165,11 +210,11 @@ test("supersession rolls back on insertion failure and database guards preserve 
     "DELETE FROM lessons",
     "INSERT OR REPLACE INTO lessons SELECT * FROM lessons",
     `INSERT OR REPLACE INTO lessons (id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at)
-      SELECT 'conflicting-id', scope, text, text_key, evidence, basis, source_harness, created_at, updated_at FROM lessons LIMIT 1`,
+      SELECT 1000, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at FROM lessons LIMIT 1`,
   ]) assert.throws(() => raw.exec(sql), /immutable|cannot be deleted|cannot be replaced/);
   assert.throws(() => raw.exec(`INSERT OR REPLACE INTO lessons
     (rowid, id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at)
-    SELECT rowid, 'rowid-conflict', scope, 'Changed.', 'different-key', evidence, basis, source_harness, created_at, updated_at
+    SELECT rowid, 1000, scope, 'Changed.', 'different-key', evidence, basis, source_harness, created_at, updated_at
     FROM lessons LIMIT 1`), /rowid/, "hidden rowid conflicts must not bypass retention guards");
   assert.deepEqual(db.get("/project", saved.id), saved);
   assert.deepEqual(db.get("/project", other.id), other);
@@ -181,14 +226,14 @@ test("supersession rolls back on insertion failure and database guards preserve 
   assert.equal(successor.evidence, "Verified again.");
   assert.throws(() => raw.prepare(`INSERT OR REPLACE INTO lessons
     (id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at, supersedes_id)
-    VALUES ('conflicting-successor', '/project', 'Other text.', 'other-key', 'Verified.', 'user_request', 'test', 1, 1, ?)`)
+    VALUES (1000, '/project', 'Other text.', 'other-key', 'Verified.', 'user_request', 'test', 1, 1, ?)`)
     .run(saved.id), /cannot be replaced/);
   assert.deepEqual(db.get("/project", successor.id), successor);
   assert.throws(() => raw.prepare("UPDATE lessons SET archived = 0, archived_at = NULL WHERE id = ?").run(saved.id), /active-to-archived/);
   db.archive("/project", other.id);
   assert.throws(() => raw.prepare(`INSERT INTO lessons
     (id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at, supersedes_id)
-    VALUES ('foreign-successor', '/other', 'Other text.', 'other-key', 'Verified.', 'user_request', 'test', 1, 1, ?)`)
+    VALUES (1000, '/other', 'Other text.', 'other-key', 'Verified.', 'user_request', 'test', 1, 1, ?)`)
     .run(other.id), /same project/);
   assert.equal(db.list("/project", { state: "all" }).total, 3);
 });

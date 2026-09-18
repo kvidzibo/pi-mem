@@ -62,14 +62,20 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
+    assert.equal(tool.parameters.properties.id.type, "integer");
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
-    const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", params, signal, undefined, ctx);
+    const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
+    for (const id of [true, "00000000-0000-4000-8000-000000000001"]) {
+      await assert.rejects(execute({ action: "archive", id }), /id must be a positive safe integer/);
+    }
+    assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
+    assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
     assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
@@ -106,6 +112,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall|Build assets before packaging|memory list\/search/);
     const command = extension.commands.get("memory");
     await command.handler(`get ${learned.id}`, ctx);
+    assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
+    await command.handler(`get #${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler("archived", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).total, 2);
@@ -165,8 +173,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
     const limitedRecall = (await event("context", { messages: [user] })).messages[0].content;
-    assert.match(limitedRecall, /1 of 3 active lessons loaded/);
     const [sqliteRecall, legacyRecall] = limitedRecall.split("\n\n");
+    assert.match(sqliteRecall, /^PROJECT LESSONS\n- /);
+    assert.match(sqliteRecall, /\n\[2 lessons omitted\.\]$/);
+    assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     assert.match(legacyRecall, /Legacy Markdown memory/);
     expectStatus(1, 3, sqliteRecall); // Omitted lessons and separately recalled legacy text do not inflate this count.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
@@ -374,9 +384,11 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     const bulk = Array.from({ length: 500 }, (_, i) => `- Imported lesson ${i}.`).join("\n") + "\n";
     writeFileSync(file, bulk);
     await command.handler("import", ctx);
-    assert.ok(Buffer.byteLength(notices.at(-1)!) > 16384, "exercise reports beyond the usual display limit");
     result = JSON.parse(notices.at(-1)!);
     assert.equal(result.ids.length, 500);
+    // Integer IDs shrink the report; verify the full batch, not a UUID-dependent minimum byte size.
+    assert.deepEqual(result.ids.map((id: number) => observer!.get(project, id).text),
+      Array.from({ length: 500 }, (_, i) => `Imported lesson ${i}.`));
     assert.equal(result.imported, 500);
     assert.equal(result.sourceRetained, true);
     assert.equal(readFileSync(file, "utf8"), bulk, "large imports must preserve the source too");
@@ -493,7 +505,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Replace lesson", text: "Seed 0. Corrected." },
       { title: "Review replacement", choice: "Save" },
       { title: "Browse / search", choice: "Seed 0. Corrected.", match: /Search: Seed 0\./ },
-      { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: ${original.id}`) },
+      { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: #${original.id}`) },
       { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
       { title: "Lesson details", choice: "Archive…" },
       { title: "Archive lesson?", choice: "Cancel", match: /future recall[\s\S]*already in a conversation/ },
@@ -547,7 +559,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     ctx.hasUI = false; ctx.mode = "print";
     await command.handler("", ctx);
     assert.equal(messages.length, 1);
-    assert.match(messages[0].content, /Database:[\s\S]*0 of 0 active lessons loaded/);
+    assert.match(messages[0].content, /^Database: .+\nPROJECT LESSONS$/);
   } finally {
     await event("session_shutdown");
     observer?.close();

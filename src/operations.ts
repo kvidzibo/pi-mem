@@ -3,7 +3,7 @@ import { MemoryStore, type Basis, type Origin } from "./store.ts";
 export const ACTIONS = ["add", "supersede", "archive"] as const;
 export interface MemoryRequest {
   action: typeof ACTIONS[number];
-  id?: string;
+  id?: number;
   text?: string;
   evidence?: string;
   basis?: Exclude<Basis, "import">;
@@ -22,11 +22,11 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
         const result = store.add(scope, input, origin);
         return { id: result.lesson.id, status: result.created ? "saved" : "already exists", scope };
       }
-      const result = store.supersede(scope, requireId(request), input, origin);
+      const result = store.supersede(scope, parseLessonId(request.id), input, origin);
       return { id: result.id, supersedes_id: result.supersedes_id, status: "superseded", scope };
     }
     case "archive": {
-      const result = store.archive(scope, requireId(request));
+      const result = store.archive(scope, parseLessonId(request.id));
       return { id: result.id, archived: result.archived, scope };
     }
     default:
@@ -34,7 +34,12 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
   }
 }
 
-function requireId(request: MemoryRequest): string {
-  if (typeof request.id !== "string" || !request.id.trim()) throw new Error("This action requires id");
-  return request.id;
+/** Parse decimal IDs at command/tool boundaries; UUIDs and coercible non-ID values are invalid. */
+export function parseLessonId(value: unknown): number {
+  const id = typeof value === "string" && /^#?[1-9]\d*$/.test(value.trim())
+    ? Number(value.trim().replace(/^#/, "")) : value;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) {
+    throw new Error("id must be a positive safe integer");
+  }
+  return id;
 }
