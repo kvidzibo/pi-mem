@@ -1,52 +1,33 @@
-import { boundedPage } from "./presentation.ts";
-import { MemoryStore, type Basis, type Origin, type State } from "./store.ts";
+import { MemoryStore, type Basis, type Origin } from "./store.ts";
 
-export const ACTIONS = ["list", "search", "get", "add", "update", "archive", "restore"] as const;
+export const ACTIONS = ["add", "supersede", "archive"] as const;
 export interface MemoryRequest {
   action: typeof ACTIONS[number];
   id?: string;
-  revision?: number;
   text?: string;
   evidence?: string;
   basis?: Exclude<Basis, "import">;
-  query?: string;
-  state?: State;
-  offset?: number;
-  limit?: number;
 }
 
+/** Agent-facing writes only. Reads stay internal to automatic recall and explicit user commands. */
 export function runMemory(store: MemoryStore, scope: string, request: MemoryRequest, origin: Origin): unknown {
   switch (request.action) {
-    case "list":
-    case "search": {
-      if (request.action === "search" && !request.query?.trim()) throw new Error("search requires query");
-      const offset = request.offset ?? 0;
-      return boundedPage(store.list(scope, {
-        query: request.query, state: request.state, offset, limit: request.limit,
-      }), offset);
-    }
-    case "get":
-      return store.get(scope, requireId(request));
     case "add":
-    case "update": {
+    case "supersede": {
       if (request.basis !== "validated_learning" && request.basis !== "validated_fix" && request.basis !== "user_request") {
-        throw new Error("add/update requires basis: validated_learning, validated_fix, or user_request");
+        throw new Error("add/supersede requires basis: validated_learning, validated_fix, or user_request");
       }
       const input = { text: request.text!, evidence: request.evidence!, basis: request.basis };
       if (request.action === "add") {
         const result = store.add(scope, input, origin);
-        return {
-          id: result.lesson.id, revision: result.lesson.revision, archived: result.lesson.archived,
-          status: result.created ? "saved" : "already exists", scope,
-        };
+        return { id: result.lesson.id, status: result.created ? "saved" : "already exists", scope };
       }
-      const result = store.update(scope, requireId(request), request.revision!, input, origin);
-      return { id: result.id, revision: result.revision, status: "updated", scope };
+      const result = store.supersede(scope, requireId(request), input, origin);
+      return { id: result.id, supersedes_id: result.supersedes_id, status: "superseded", scope };
     }
-    case "archive":
-    case "restore": {
-      const result = store.setArchived(scope, requireId(request), request.revision!, request.action === "archive");
-      return { id: result.id, revision: result.revision, archived: result.archived, scope };
+    case "archive": {
+      const result = store.archive(scope, requireId(request));
+      return { id: result.id, archived: result.archived, scope };
     }
     default:
       throw new Error("Unknown memory action");

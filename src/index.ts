@@ -7,16 +7,16 @@ import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, runMemory, type MemoryRequest } from "./operations.ts";
-import { clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
+import { boundedPage, clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Origin } from "./store.ts";
 
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "add", "edit", "archive", "restore", "archived", "import", "export", "reload", "help"];
+const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
   "/memory — database, project and loaded lessons",
   "/memory list [offset] | archived [offset] | search <text> | get <id>",
-  "/memory add <lesson> | edit <id> <lesson> | archive <id> | restore <id>",
+  "/memory add <lesson> | supersede <id> <lesson> | archive <id>",
   "/memory import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
   "/memory export <new-path> — active lesson text, no overwrite",
   "/memory reload — reconnect and reread database configuration",
@@ -124,7 +124,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     try {
       const { limits } = current(ctx);
-      return { systemPrompt: event.systemPrompt + "\n\nFor memory add/update: save one actionable point, preferably one sentence. " +
+      return { systemPrompt: event.systemPrompt + "\n\nFor memory add/supersede: save one actionable point, preferably one sentence. " +
         "Keep evidence to a short verification statement. Preserve essential commands and conditions; omit background, narration, repetition and filler. " +
         `Maximum ${limits.maxLessonWords} words per lesson and ${limits.maxEvidenceWords} words for evidence (whitespace-separated). ` +
         "These are ceilings, not targets. Overlong saves are rejected, not truncated." };
@@ -143,28 +143,24 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory",
     label: "Project memory",
-    description: "SQLite lessons for this project only. list/search return paged results capped at 16 KiB; use nextOffset for more. " +
-      "add/update require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
+    description: "Write project lessons. Active lessons are recalled automatically; no on-demand reads. " +
+      "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
-      "update/archive/restore require id and the current revision from get/list. Exact duplicates are not added; archived duplicates stay archived. " +
+      "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
+      "Records are retained: no in-place edits, restore, or delete. Exact active duplicates are not added. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
-    promptSnippet: "Read and maintain SQLite project lessons",
+    promptSnippet: "Add, supersede, or archive project lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
       id: Type.Optional(Type.String({ maxLength: 80 })),
-      revision: Type.Optional(Type.Integer({ minimum: 1 })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
-      query: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-      state: Type.Optional(StringEnum(["active", "archived", "all"] as const)),
-      offset: Type.Optional(Type.Integer({ minimum: 0 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const { store, scope } = current(ctx);
-      if (!["list", "search", "get"].includes(params.action) && !ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
+      if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
       }
       const result = runMemory(store, scope, params, origin(ctx));
@@ -175,7 +171,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("memory", {
-    description: "Inspect, save, search, edit, archive, import or export project lessons",
+    description: "Inspect, save, search, supersede, archive, import or export project lessons",
     getArgumentCompletions(prefix) {
       return COMMANDS.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
     },
@@ -223,21 +219,21 @@ export default function memoryExtension(pi: ExtensionAPI) {
             return exportMarkdown(store, scope, output);
           });
           show({ output, lessons: count }, ctx);
+        } else if (command === "list" || command === "archived") {
+          const offset = rest ? Number(rest) : 0;
+          show(boundedPage(store.list(scope, { state: command === "archived" ? "archived" : "active", offset }), offset), ctx);
+        } else if (command === "search") {
+          if (!rest.trim()) throw new Error("search requires query");
+          show(boundedPage(store.list(scope, { query: rest }), 0), ctx);
+        } else if (command === "get") {
+          show(store.get(scope, rest), ctx);
         } else {
           let request: MemoryRequest;
-          if (command === "list" || command === "archived") {
-            request = { action: "list", state: command === "archived" ? "archived" : "active", offset: rest ? Number(rest) : 0 };
-          } else if (command === "search") {
-            request = { action: "search", query: rest };
-          } else if (command === "get") {
-            request = { action: "get", id: rest };
-          } else if (command === "add") {
+          if (command === "add") {
             request = { action: "add", text: rest, basis: "user_request", evidence: "User-requested." };
-          } else if (command === "edit" || command === "archive" || command === "restore") {
+          } else if (command === "supersede" || command === "archive") {
             const [id, text] = firstWord(rest);
-            const item = store.get(scope, id);
-            request = { action: command === "edit" ? "update" : command, id, revision: item.revision,
-              text, basis: "user_request", evidence: "User-requested." };
+            request = { action: command, id, text, basis: "user_request", evidence: "User-requested." };
           } else {
             throw new Error(HELP);
           }

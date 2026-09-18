@@ -21,6 +21,12 @@ test("explicit Markdown migration is atomic, repeatable, confined, and preserves
   assert.equal(imported.sourceRetained, true);
   assert.equal(readFileSync(file, "utf8"), source);
   assert.equal(importMarkdown(db, dir, dir, "MEMORY.md", origin).existing, 2);
+  const archived = db.archive(dir, imported.ids[0]);
+  const repeated = importMarkdown(db, dir, dir, "MEMORY.md", origin);
+  assert.equal(repeated.imported, 1, "an archived match creates a new record instead of restoring the old one");
+  assert.equal(repeated.existing, 1);
+  assert.notEqual(repeated.ids[0], archived.id);
+  assert.deepEqual(db.get(dir, archived.id), archived);
   const output = exportPath(dir, dir, "export.md");
   assert.equal(exportMarkdown(db, dir, output), 2);
   assert.deepEqual(new Set(parseMarkdown(readFileSync(output, "utf8"))), new Set(parseMarkdown(source)));
