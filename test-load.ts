@@ -64,12 +64,14 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
-    const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", params, signal, undefined, ctx);
+    const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
+    await assert.rejects(execute({ action: "archive", id: true }), /id must be a positive integer/);
+    assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "boolean IDs must not be coerced into lesson #1");
     assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);

@@ -235,6 +235,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
     }),
+    prepareArguments(args) {
+      // Pi's schema coercion can turn true into 1; reject non-ID types before validation.
+      if (args && typeof args === "object" && "id" in args && args.id != null &&
+          typeof args.id !== "number" && typeof args.id !== "string") {
+        throw new Error("memory id must be a positive integer or a legacy reference");
+      }
+      return args as MemoryRequest; // The normal schema validation still follows this guard.
+    },
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const { store, scope } = current(ctx);
