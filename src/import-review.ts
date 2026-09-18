@@ -47,7 +47,7 @@ export function importReview(preview: ImportPreview, database: string, scope: st
   add(`Database: ${JSON.stringify(database)}`);
   add(`${before ? `${before.length} source lessons` : "Unstructured source"} → ${after.length} proposed lessons`, "accent");
   add("Review wording and missing details; matching counts do not prove matching meaning.", "dim");
-  add("Exact duplicates are skipped; archived duplicates stay archived. The original file is not edited.", "dim");
+  add("Active duplicates are skipped; archived matches create new records. The original file is not edited.", "dim");
   add("");
   if (before && before.length === after.length) {
     after.forEach((text, index) => {

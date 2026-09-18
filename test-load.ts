@@ -41,6 +41,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(ctx.cwd);
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
+  let inspection: MemoryStore | undefined;
   const event = async (name: string, value: object = {}) => {
     let result;
     for (const handler of extension?.handlers.get(name) ?? []) result = await handler(value, ctx);
@@ -53,6 +54,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
     const tool = extension.tools.get("memory").definition;
+    assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
+    inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", params, signal, undefined, ctx);
     const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
@@ -64,37 +68,62 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const learned = JSON.parse((await execute({ ...input, basis: "validated_learning",
       text: "Build assets before packaging.", evidence: "Verified the build dependency." })).content[0].text);
     assert.equal(learned.status, "saved");
-    assert.equal(JSON.parse((await execute({ action: "get", id: learned.id })).content[0].text).basis, "validated_learning");
+    const original = inspection.get(ctx.cwd, learned.id);
+    assert.equal(original.basis, "validated_learning");
     const user = { role: "user", content: "Continue", timestamp: 1 };
     let recall = await event("context", { messages: [user] });
     assert.match(recall.messages[0].content, /Test startup recall/);
     recall = await event("context", recall);
     assert.equal(recall.messages.length, 2, "repeated requests must not accumulate memory blocks");
-    const otherConnection = new MemoryStore(process.env.PI_MEMORY_DB);
-    const archived = otherConnection.setArchived(ctx.cwd, saved.id, saved.revision, true);
-    otherConnection.close();
+    inspection.archive(ctx.cwd, saved.id);
     recall = await event("context", { messages: [user] });
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
-    await execute({ action: "restore", id: saved.id, revision: archived.revision });
+    for (const action of ["get", "list", "search", "history", "update", "restore"]) {
+      await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
+    }
+    const replacement = JSON.parse((await execute({ ...input, action: "supersede", id: learned.id,
+      text: "Replacement lesson.", evidence: "Verified replacement." })).content[0].text);
+    assert.equal(replacement.status, "superseded");
+    assert.equal(replacement.supersedes_id, learned.id);
+    assert.notEqual(replacement.id, learned.id);
+    assert.deepEqual(inspection.get(ctx.cwd, learned.id),
+      { ...original, archived: true, archived_at: inspection.get(ctx.cwd, replacement.id).created_at });
+    await assert.rejects(execute({ ...input, action: "supersede", id: learned.id }), /already archived/);
     await event("session_shutdown", { reason: "reload" });
     await event("session_start", { reason: "reload" });
-    assert.match((await event("context", { messages: [] })).messages[0].content, /Test startup recall/);
+    recall = await event("context", { messages: [] });
+    assert.match(recall.messages[0].content, /Replacement lesson/);
+    assert.doesNotMatch(recall.messages[0].content, /Test startup recall|Build assets before packaging|memory list\/search/);
+    const command = extension.commands.get("memory");
+    await command.handler(`get ${learned.id}`, ctx);
+    assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
+    await command.handler("archived", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).total, 2);
+    await command.handler("search Replacement", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).lessons[0].id, replacement.id);
+    await command.handler(`restore ${learned.id}`, ctx);
+    assert.match(notices.at(-1)!, /\/memory —/);
+    assert.equal(inspection.get(ctx.cwd, learned.id).archived, true);
     ctx.cwd = join(directory, "other");
     await event("session_shutdown", { reason: "resume" });
     await event("session_start", { reason: "resume" });
-    assert.doesNotMatch((await event("context", { messages: [] })).messages[0].content, /Test startup recall/);
-    await assert.rejects(execute({ action: "get", id: saved.id }), /not found in this project/);
+    assert.doesNotMatch((await event("context", { messages: [] })).messages[0].content, /Replacement lesson/);
+    await assert.rejects(execute({ ...input, action: "supersede", id: replacement.id }), /not found in this project/);
+    await assert.rejects(execute({ action: "archive", id: replacement.id }), /not found in this project/);
     ctx.sessionManager.getSessionFile = () => undefined;
     await assert.rejects(execute(input), /Ephemeral sessions/);
     await assert.rejects(execute({ ...input, basis: "validated_learning" }), /Ephemeral sessions/);
+    await assert.rejects(execute({ ...input, action: "supersede", id: replacement.id }), /Ephemeral sessions/);
+    await assert.rejects(execute({ action: "archive", id: replacement.id }), /Ephemeral sessions/);
     ctx.hasUI = false;
     assert.equal(JSON.parse((await execute({ ...input, basis: "user_request" })).content[0].text).status, "saved");
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await assert.rejects(execute({ ...input, basis: "user_request", text: "Must not save" }, controller.signal), /cancelled/);
-    assert.equal(JSON.parse((await execute({ action: "list" })).content[0].text).total, 1);
+    assert.equal(inspection.list(ctx.cwd).total, 1);
     ctx.hasUI = true;
-    const command = extension.commands.get("memory");
+    await command.handler("list", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).total, 1);
     await command.handler("add Saved by a command.", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).status, "saved");
     writeFileSync(join(ctx.cwd, "old.md"), "# Lessons\n\n- Imported explicitly.\n");
@@ -111,7 +140,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await event("session_start", { reason: "startup" });
     assert.equal(statuses.at(-1), "memory unavailable");
     assert.match((await event("context", { messages: [user] })).messages[0].content, /Project memory unavailable/);
-    await assert.rejects(execute({ action: "list" }));
+    await assert.rejects(execute({ ...input, basis: "user_request" }), /JSON/);
     writeFileSync(join(ctx.cwd, "MEMORY.md"), "- Legacy fallback survives database initialization failure.\n");
     assert.match((await event("context", { messages: [] })).messages[0].content, /Legacy fallback survives/);
     const config = { databasePath: "db.sqlite3", maxLessonWords: 3, maxEvidenceWords: 4 };
@@ -131,13 +160,19 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler("add Compact evidence works.", ctx);
     assert.match(notices.at(-1)!, /"status": "saved"/, "command evidence must fit the smallest supported limit");
     const compact = JSON.parse(notices.at(-1)!);
-    await command.handler(`edit ${compact.id} Compact edits work.`, ctx);
-    assert.match(notices.at(-1)!, /"status": "updated"/);
+    await command.handler(`supersede ${compact.id} Compact replacements work.`, ctx);
+    assert.match(notices.at(-1)!, /"status": "superseded"/);
+    assert.equal(inspection.get(ctx.cwd, compact.id).text, "Compact evidence works.");
+    assert.equal(inspection.get(ctx.cwd, compact.id).archived, true);
+    const successor = JSON.parse(notices.at(-1)!);
+    await command.handler(`archive ${successor.id}`, ctx);
+    assert.equal(inspection.get(ctx.cwd, successor.id).archived, true);
     writeFileSync(join(ctx.cwd, "low evidence.md"), "- Compact imports work.\n");
     await command.handler("import low evidence.md", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).imported, 1, "generated import evidence must fit even when the filename contains spaces");
   } finally {
     await event("session_shutdown", { reason: "quit" });
+    inspection?.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }

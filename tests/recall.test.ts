@@ -7,8 +7,8 @@ import { databasePath, memoryConfig } from "../src/config.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
 import { importMarkdown } from "../src/markdown.ts";
 import { runMemory } from "../src/operations.ts";
-import { CONTEXT_BYTES, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
-import { MemoryStore, type Page } from "../src/store.ts";
+import { boundedPage, CONTEXT_BYTES, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
+import { MemoryStore } from "../src/store.ts";
 
 test("database path precedence is env, global extension config, then default; bad config fails visibly", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-config-"));
@@ -37,7 +37,7 @@ test("word limits bound new writes and atomic imports without changing existing 
   const saved = db.add(dir, input, origin).lesson;
   assert.throws(() => db.add(dir, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
   assert.throws(() => db.add(dir, { ...input, evidence: text + " extra" }, origin), /evidence exceeds 20 words/);
-  assert.throws(() => db.update(dir, saved.id, saved.revision, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
+  assert.throws(() => db.supersede(dir, saved.id, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
   assert.deepEqual(db.get(dir, saved.id), saved);
   writeFileSync(join(dir, "lessons.md"), `- A valid new lesson.\n- ${text.replace(/\s+/gu, " ")} extra\n`);
   assert.throws(() => importMarkdown(db, dir, dir, "lessons.md", origin), /text exceeds 20 words/);
@@ -53,7 +53,7 @@ test("word limits bound new writes and atomic imports without changing existing 
   db.close();
   db = new MemoryStore(defaults.databasePath);
   assert.deepEqual(db.get(dir, longer.id), longer, "lower limits must not rewrite or hide existing lessons");
-  assert.equal(db.setArchived(dir, longer.id, longer.revision, true).archived, true);
+  assert.equal(db.archive(dir, longer.id).archived, true);
   for (const maxLessonWords of [0, 1.5, "20", null]) {
     writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxLessonWords }));
     assert.throws(() => memoryConfig(dir, {}), /maxLessonWords must be a positive safe integer/);
@@ -97,10 +97,12 @@ test("recall and paged search stay byte-bounded without deleting excess lessons"
   const context = memoryContext("/project", db.recall("/project"));
   assert.ok(Buffer.byteLength(context.text) <= CONTEXT_BYTES);
   assert.ok(context.loaded > 0 && context.loaded < 30);
+  assert.match(context.text, /Omitted lessons remain stored/);
+  assert.doesNotMatch(context.text, /memory list|memory search|revision/);
   const ids = new Set<string>();
   let offset: number | null = 0;
   do {
-    const page = runMemory(db, "/project", { action: "search", query: "记", offset }, origin) as Page;
+    const page = boundedPage(db.list("/project", { query: "记", offset }), offset);
     assert.ok(Buffer.byteLength(JSON.stringify(page)) <= RESULT_BYTES);
     for (const row of page.lessons) ids.add(row.id);
     offset = page.nextOffset;
