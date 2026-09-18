@@ -59,7 +59,7 @@ test("word limits bound new writes and atomic imports without changing existing 
   db.close();
   db = new MemoryStore(defaults.databasePath);
   assert.deepEqual(db.get(dir, longer.id), longer, "lower limits must not rewrite or hide existing lessons");
-  assert.equal(db.archive(dir, longer.id).archived, true);
+  assert.equal(db.archive(dir, longer.id).lesson.archived, true);
   for (const maxLessonWords of [0, 1.5, "20", null]) {
     writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxLessonWords }));
     assert.throws(() => memoryConfig(dir, {}), /maxLessonWords must be a positive safe integer/);

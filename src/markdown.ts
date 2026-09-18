@@ -128,6 +128,7 @@ function saveImport(store: MemoryStore, scope: string, source: MarkdownSource, t
     existing: imported.filter((item) => !item.created).length,
     archived: imported.filter((item) => item.lesson.archived).length,
     ids: imported.map((item) => item.lesson.id),
+    createdIds: imported.filter((item) => item.created).map((item) => item.lesson.id),
     sourceRetained: true,
   };
 }
