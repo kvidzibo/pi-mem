@@ -42,6 +42,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
+  const expectStatus = (loaded: number, total: number, text: string) => {
+    // Match Pi's documented character-count heuristic against the actual injected SQLite block.
+    const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
+    assert.equal(statuses.at(-1), `memory ${loaded}/${total} · ~${tokens} tok`);
+  };
   const event = async (name: string, value: object = {}) => {
     let result;
     for (const handler of extension?.handlers.get(name) ?? []) result = await handler(value, ctx);
@@ -53,6 +58,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.deepEqual([...extension.commands.keys()], ["memory"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
+    const emptyRecall = await event("context", { messages: [] });
+    expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
@@ -63,6 +70,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
+    assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
     const learned = JSON.parse((await execute({ ...input, basis: "validated_learning",
@@ -73,11 +81,13 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const user = { role: "user", content: "Continue", timestamp: 1 };
     let recall = await event("context", { messages: [user] });
     assert.match(recall.messages[0].content, /Test startup recall/);
+    expectStatus(2, 2, recall.messages[0].content);
     recall = await event("context", recall);
     assert.equal(recall.messages.length, 2, "repeated requests must not accumulate memory blocks");
     inspection.archive(ctx.cwd, saved.id);
     recall = await event("context", { messages: [user] });
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
+    expectStatus(1, 1, recall.messages[0].content);
     for (const action of ["get", "list", "search", "history", "update", "restore"]) {
       await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
     }
@@ -154,7 +164,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.match(notices.at(-1)!, /text exceeds 3 words/);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
-    assert.match((await event("context", { messages: [user] })).messages[0].content, /1 of 3 active lessons loaded/);
+    const limitedRecall = (await event("context", { messages: [user] })).messages[0].content;
+    assert.match(limitedRecall, /1 of 3 active lessons loaded/);
+    const [sqliteRecall, legacyRecall] = limitedRecall.split("\n\n");
+    assert.match(legacyRecall, /Legacy Markdown memory/);
+    expectStatus(1, 3, sqliteRecall); // Omitted lessons and separately recalled legacy text do not inflate this count.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
     await command.handler("add Compact evidence works.", ctx);

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { estimateTokens, getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
@@ -71,7 +71,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const { store, scope } = current(ctx);
     const page = store.recall(scope);
     const result = memoryContext(scope, page);
-    if (ctx.hasUI) ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}`);
+    if (ctx.hasUI) {
+      const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
+      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total} · ~${tokens.toLocaleString("en-US")} tok`);
+    }
     notified = undefined;
     return result;
   }
