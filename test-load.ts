@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -19,7 +20,10 @@ async function load() {
   const result = await loadExtensions(manifest.pi.extensions.map((path: string) => join(ROOT, path)), ROOT);
   assert.deepEqual(result.errors, []);
   assert.equal(result.extensions.length, 1);
-  return { ...result.extensions[0], runtime: result.runtime };
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const sessionLog = SessionManager.inMemory(ROOT);
+  result.runtime.appendEntry = sessionLog.appendCustomEntry.bind(sessionLog);
+  return { ...result.extensions[0], runtime: result.runtime, sessionLog };
 }
 
 test("real Pi loader: immediate persistence, bounded replaceable recall, lifecycle, commands and failures", async () => {
@@ -42,11 +46,12 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
-  const expectStatus = (loaded: number, total: number, text: string) => {
+  const expectStatus = (loaded: number, total: number, text: string, added = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
-    assert.equal(statuses.at(-1), `memory ${loaded}/${total} · ~${tokens} tok`);
+    assert.equal(statuses.at(-1), `memory ${loaded}/${total}${added ? ` (+${added})` : ""} · ~${tokens} tok`);
   };
+  const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
     let result;
     for (const handler of extension?.handlers.get(name) ?? []) result = await handler(value, ctx);
@@ -76,8 +81,20 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     }
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
-    assert.match(statuses.at(-1)!, /^memory 1\/1 · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
+    assert.match(statuses.at(-1)!, /^memory 1\/1 \(\+1\) · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
+    assert.equal(savedEntries().length, 1);
+    assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
+    const renderer = extension.entryRenderers.get("pi-mem-saved");
+    const component = renderer(savedEntries()[0], { expanded: false }, { fg: (_color: string, text: string) => text });
+    assert.match(component.render(100).map((line: string) => line.trimEnd()).join("\n"),
+      new RegExp(`Memory added \\(\\+1\\)\\n#${saved.id}: Test startup recall\\.`));
+    for (const width of [1, 12, 40]) {
+      assert.ok(component.render(width).every((line: string) => visibleWidth(line) <= width));
+    }
+    assert.deepEqual(extension.sessionLog.buildSessionContext().messages, [], "save cards must never enter model context");
     assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
+    assert.equal(savedEntries().length, 1, "duplicates must not create chat entries");
+    assert.match(statuses.at(-1)!, /\(\+1\)/);
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
     const learned = JSON.parse((await execute({ ...input, basis: "validated_learning",
       text: "Build assets before packaging.", evidence: "Verified the build dependency." })).content[0].text);
@@ -87,13 +104,13 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const user = { role: "user", content: "Continue", timestamp: 1 };
     let recall = await event("context", { messages: [user] });
     assert.match(recall.messages[0].content, /Test startup recall/);
-    expectStatus(2, 2, recall.messages[0].content);
+    expectStatus(2, 2, recall.messages[0].content, 2);
     recall = await event("context", recall);
     assert.equal(recall.messages.length, 2, "repeated requests must not accumulate memory blocks");
     inspection.archive(ctx.cwd, saved.id);
     recall = await event("context", { messages: [user] });
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
-    expectStatus(1, 1, recall.messages[0].content);
+    expectStatus(1, 1, recall.messages[0].content, 2); // Archives do not undo this session's creations.
     for (const action of ["get", "list", "search", "history", "update", "restore"]) {
       await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
     }
@@ -102,6 +119,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.equal(replacement.status, "superseded");
     assert.equal(replacement.supersedes_id, learned.id);
     assert.notEqual(replacement.id, learned.id);
+    assert.equal(savedEntries().length, 3);
+    assert.deepEqual(savedEntries().at(-1)!.data, [{ id: replacement.id, text: "Replacement lesson.", supersedes_id: learned.id }]);
+    assert.match(renderer(savedEntries().at(-1), { expanded: false }, { fg: (_color: string, text: string) => text }).render(120).join("\n"),
+      new RegExp(`#${replacement.id} \\(replaces #${learned.id}\\): Replacement lesson\\.`));
     assert.deepEqual(inspection.get(ctx.cwd, learned.id),
       { ...original, archived: true, archived_at: inspection.get(ctx.cwd, replacement.id).created_at });
     await assert.rejects(execute({ ...input, action: "supersede", id: learned.id }), /already archived/);
@@ -110,6 +131,14 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /Replacement lesson/);
     assert.doesNotMatch(recall.messages[0].content, /Test startup recall|Build assets before packaging|memory list\/search/);
+    expectStatus(1, 1, recall.messages[0].content, 3);
+    assert.equal(savedEntries().length, 3, "reload must not repeat save entries");
+    ctx.sessionManager.getSessionId = () => "new-session";
+    await event("session_start", { reason: "new" });
+    expectStatus(1, 1, recall.messages[0].content);
+    ctx.sessionManager.getSessionId = () => "load-session";
+    await event("session_start", { reason: "resume" });
+    expectStatus(1, 1, recall.messages[0].content, 3);
     const command = extension.commands.get("memory");
     await command.handler(`get ${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
@@ -125,7 +154,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     ctx.cwd = join(directory, "other");
     await event("session_shutdown", { reason: "resume" });
     await event("session_start", { reason: "resume" });
-    assert.doesNotMatch((await event("context", { messages: [] })).messages[0].content, /Replacement lesson/);
+    const otherRecall = await event("context", { messages: [] });
+    assert.doesNotMatch(otherRecall.messages[0].content, /Replacement lesson/);
+    expectStatus(0, 0, otherRecall.messages[0].content);
     await assert.rejects(execute({ ...input, action: "supersede", id: replacement.id }), /not found in this project/);
     await assert.rejects(execute({ action: "archive", id: replacement.id }), /not found in this project/);
     ctx.sessionManager.getSessionFile = () => undefined;
@@ -144,9 +175,16 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.equal(JSON.parse(notices.at(-1)!).total, 1);
     await command.handler("add Saved by a command.", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).status, "saved");
-    writeFileSync(join(ctx.cwd, "old.md"), "# Lessons\n\n- Imported explicitly.\n");
+    assert.equal(savedEntries().length, 5, "headless tool and direct command saves are logged too");
+    writeFileSync(join(ctx.cwd, "old.md"), "# Lessons\n\n- Imported explicitly.\n- Saved by a command.\n");
     await command.handler("import old.md", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).imported, 1);
+    assert.equal(JSON.parse(notices.at(-1)!).existing, 1);
+    assert.equal(savedEntries().length, 6);
+    assert.deepEqual(savedEntries().at(-1)!.data, [{ id: JSON.parse(notices.at(-1)!).createdIds[0], text: "Imported explicitly.", supersedes_id: null }]);
+    assert.match(statuses.at(-1)!, /\(\+3\)/, "import duplicates must not count");
+    await command.handler("import old.md", ctx);
+    assert.equal(savedEntries().length, 6, "reimporting active lessons must not create chat entries");
     await command.handler("export exported.md", ctx);
     assert.match(readFileSync(join(ctx.cwd, "exported.md"), "utf8"), /Imported explicitly/);
     await command.handler("export exported.md", ctx);
@@ -178,7 +216,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.match(sqliteRecall, /\n\[2 lessons omitted\.\]$/);
     assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     assert.match(legacyRecall, /Legacy Markdown memory/);
-    expectStatus(1, 3, sqliteRecall); // Omitted lessons and separately recalled legacy text do not inflate this count.
+    expectStatus(1, 3, sqliteRecall, 3); // Omitted lessons and separately recalled legacy text do not inflate token counts.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
     await command.handler("add Compact evidence works.", ctx);
@@ -526,7 +564,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.get(project, original.id).archived, true);
     assert.equal(observer.list(project, { state: "archived" }).total, 2);
     assert.equal(observer.list(project, { query: "New menu lesson." }).lessons[0].basis, "user_request");
-    assert.equal(messages.length, 0, "browsing and user writes must not inject transcript messages");
+    assert.equal(messages.length, 0, "browsing and user writes must not inject model-context messages");
+    const saveCards: CustomEntry[] = extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom");
+    assert.equal(saveCards.length, 2, "only approved menu creations should add chat entries");
+    assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
 
     // Display normalization must not turn unchanged whitespace into literal escapes or new wording.
     const whitespace = "Keep\toriginal\r\nwhitespace.";

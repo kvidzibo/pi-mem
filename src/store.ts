@@ -240,6 +240,15 @@ export class MemoryStore {
     return { lessons, total, nextOffset: next < total ? next : null };
   }
 
+  /** Count creations, including replacements and later archives, by this session only. */
+  sessionAdditions(scope: string, origin: Origin): number {
+    this.checkScope(scope);
+    this.checkOrigin(origin);
+    return Number(this.db.prepare(`SELECT count(*) AS n FROM lessons
+      WHERE scope = ? AND source_harness = ? AND source_session = ?`)
+      .get(scope, origin.harness, origin.session)!.n);
+  }
+
   recall(scope: string): RecallPage {
     this.checkScope(scope);
     const total = Number(this.db.prepare("SELECT count(*) AS n FROM lessons WHERE scope = ? AND archived = 0").get(scope)!.n);

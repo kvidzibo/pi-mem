@@ -21,6 +21,7 @@ interface MenuAccess {
   current: () => MenuState;
   check: () => void;
   refresh: () => void;
+  saved: (ids: number[]) => void;
   importFile: (file: string) => Promise<void>;
   signal: AbortSignal;
   origin: Origin;
@@ -68,9 +69,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       const { store, scope } = access.current();
       if (previous) {
         const replacement = store.supersede(scope, previous.id, input, access.origin);
+        access.saved([replacement.id]);
         ctx.ui.notify(`Lesson replaced: ${replacement.id}. Original retained.`, "info");
       } else {
         const result = store.add(scope, input, access.origin);
+        if (result.created) access.saved([result.lesson.id]);
         ctx.ui.notify(result.created ? `Lesson saved: ${result.lesson.id}` : `Already active: ${result.lesson.id}`, "info");
       }
       access.refresh();

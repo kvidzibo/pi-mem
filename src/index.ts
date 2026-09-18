@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { estimateTokens, getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
@@ -8,10 +9,12 @@ import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
-import { boundedPage, clipped, memoryContext, RESULT_BYTES } from "./presentation.ts";
+import { boundedPage, clipped, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
-import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Origin } from "./store.ts";
+import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
+type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
+const SAVED_TYPE = "pi-mem-saved";
 const CONTEXT_TYPE = "pi-mem-context";
 const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
@@ -73,7 +76,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const result = memoryContext(page);
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
-      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total} · ~${tokens.toLocaleString("en-US")} tok`);
+      const added = store.sessionAdditions(scope, origin(ctx));
+      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}${added ? ` (+${added})` : ""} · ~${tokens.toLocaleString("en-US")} tok`);
     }
     notified = undefined;
     return result;
@@ -94,6 +98,34 @@ export default function memoryExtension(pi: ExtensionAPI) {
     if (ctx.hasUI) ctx.ui.notify(text, "info");
     else pi.sendMessage({ customType: "pi-mem-report", content: text, display: true });
   }
+
+  function recordSaved(ids: number[], ctx: ExtensionContext) {
+    if (!ids.length) return;
+    try {
+      const { store, scope } = current(ctx);
+      const lessons: SavedLesson[] = ids.map((id) => {
+        const { text, supersedes_id } = store.get(scope, id);
+        return { id, text, supersedes_id };
+      });
+      // Durable chat-only entries: no extra model context, steering, or agent turn.
+      pi.appendEntry<SavedLesson[]>(SAVED_TYPE, lessons);
+    } catch (error) {
+      // A display failure must never turn an already-committed save into a reported write failure.
+      if (ctx.hasUI) ctx.ui.notify(`Memory saved, but chat entry failed: ${clipped(String(error), 700)}`, "warning");
+    }
+  }
+
+  function recordWrite(result: ReturnType<typeof runMemory>, ctx: ExtensionContext) {
+    if (result.status === "saved" || result.status === "superseded") recordSaved([result.id], ctx);
+    return result;
+  }
+
+  pi.registerEntryRenderer<SavedLesson[]>(SAVED_TYPE, (entry, _options, theme) => {
+    const lessons = entry.data ?? [];
+    const heading = theme.fg("success", `Memory added (+${lessons.length})`);
+    const lines = lessons.map((lesson) => `#${lesson.id}${lesson.supersedes_id ? ` (replaces #${lesson.supersedes_id})` : ""}: ${visible(lesson.text)}`);
+    return new Text([heading, ...lines].join("\n"), 0, 0);
+  });
 
   function recall(ctx: ExtensionContext): string {
     const parts: string[] = [];
@@ -137,6 +169,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const result = await reviewedImport(ctx, { store, path, scope, cwd, limits,
         file, origin: source, signal: controller.signal, check });
       if (generation === started) {
+        if (result) recordSaved(result.createdIds, ctx);
         // Imports require UI. Preserve all lesson IDs and hashes, even after a large batch.
         ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved.", "info");
         try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
@@ -171,6 +204,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           },
           check, signal: controller.signal, origin: source, configPath: join(getAgentDir(), "pi-mem.json"), help: HELP,
           refresh: () => { try { snapshot(ctx); } catch (error) { unavailable(error, ctx); } },
+          saved: (ids) => recordSaved(ids, ctx),
           importFile: (file) => { check(); return importFile(file, ctx); },
         });
         check();
@@ -246,7 +280,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
       }
-      const result = runMemory(store, scope, params, origin(ctx));
+      const result = recordWrite(runMemory(store, scope, params, origin(ctx)), ctx);
       // Saving succeeded even if a later status/recall refresh fails; report the commit accurately.
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
@@ -301,7 +335,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           } else {
             throw new Error(HELP);
           }
-          show(runMemory(store, scope, request, source), ctx);
+          show(recordWrite(runMemory(store, scope, request, source), ctx), ctx);
         }
         try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       } catch (error) {

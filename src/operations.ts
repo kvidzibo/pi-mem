@@ -10,7 +10,7 @@ export interface MemoryRequest {
 }
 
 /** Agent-facing writes only. Reads stay internal to automatic recall and explicit user commands. */
-export function runMemory(store: MemoryStore, scope: string, request: MemoryRequest, origin: Origin): unknown {
+export function runMemory(store: MemoryStore, scope: string, request: MemoryRequest, origin: Origin) {
   switch (request.action) {
     case "add":
     case "supersede": {
