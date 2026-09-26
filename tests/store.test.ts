@@ -65,14 +65,14 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUIDs while retaining lessons, integer history and recall order`, (t) => {
+for (const version of [1, 2, 3, 4, 5]) test(`schema ${version} upgrades discard UUIDs while retaining lessons, integer history and recall order`, (t) => {
   const path = temporary(t);
   const legacy = new DatabaseSync(path);
   t.after(() => legacy.close());
   legacy.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE lessons (
-      id ${version === 4 ? "INTEGER" : "TEXT"} PRIMARY KEY,
+      id ${version >= 4 ? "INTEGER" : "TEXT"} PRIMARY KEY ${version === 5 ? "CHECK(typeof(id) = 'integer' AND id > 0)" : ""},
       ${version === 4 ? "legacy_id TEXT UNIQUE," : ""}
       scope TEXT NOT NULL,
       text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1200),
@@ -85,7 +85,7 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
       updated_at INTEGER NOT NULL,
       revision INTEGER NOT NULL DEFAULT 1,
       archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
-      ${version >= 3 ? `archived_at INTEGER, supersedes_id ${version === 4 ? "INTEGER" : "TEXT"} UNIQUE REFERENCES lessons(id)` : "UNIQUE(scope, text_key)"}
+      ${version >= 3 ? `archived_at INTEGER, supersedes_id ${version >= 4 ? "INTEGER" : "TEXT"} UNIQUE REFERENCES lessons(id)` : "UNIQUE(scope, text_key)"}
     ) ${version >= 3 ? "WITHOUT ROWID" : ""};
     CREATE INDEX lessons_recall ON lessons(scope, archived, updated_at DESC, id);
     PRAGMA application_id = ${0x504d454d};
@@ -93,7 +93,7 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
   `);
   const bases = ["validated_fix", "user_request", "import", ...(version >= 2 ? ["validated_learning"] : [])];
   const uuids = bases.map((_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`);
-  const ids = version === 4 ? [41, 7, 99, 3] : uuids;
+  const ids = version >= 4 ? [41, 7, 99, 3] : uuids;
   for (const [i, basis] of bases.entries()) {
     const text = `Legacy ${basis} lesson.`;
     legacy.prepare(`INSERT INTO lessons
@@ -114,10 +114,13 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
       BEGIN SELECT RAISE(ABORT, 'immutable'); END;
     CREATE TRIGGER lessons_no_delete BEFORE DELETE ON lessons
       BEGIN SELECT RAISE(ABORT, 'cannot be deleted'); END;
+    CREATE TRIGGER lessons_archive_only BEFORE UPDATE OF archived, archived_at ON lessons
+      WHEN OLD.archived != 0 OR NEW.archived != 1 OR NEW.archived_at IS NULL
+      BEGIN SELECT RAISE(ABORT, 'Only active-to-archived transitions are allowed'); END;
   `);
   const original = legacy.prepare("SELECT * FROM lessons ORDER BY created_at, id").all();
-  const mapping = new Map(original.map((row, i) => [row.id, version === 4 ? Number(row.id) : i + 1]));
-  const expected = original.map(({ legacy_id: _discarded, ...row }) => ({ ...row, id: mapping.get(row.id)!,
+  const mapping = new Map(original.map((row, i) => [row.id, version >= 4 ? Number(row.id) : i + 1]));
+  const expected = original.map(({ legacy_id: _discarded, ...row }) => ({ ...row, priority: 5, id: mapping.get(row.id)!,
     archived_at: row.archived_at ?? null, supersedes_id: row.supersedes_id ? mapping.get(row.supersedes_id) : null }))
     .sort((a, b) => a.id - b.id);
   const firstId = mapping.get(ids[0])!;
@@ -128,7 +131,7 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
   const migrated = new DatabaseSync(path);
   try {
     assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all().map((row) => ({ ...row })), expected);
-    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 5);
+    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 6);
     assert.equal(migrated.prepare("PRAGMA table_info(lessons)").all().some((column) => column.name === "legacy_id"), false);
     for (const uuid of uuids) assert.equal(JSON.stringify(expected).includes(uuid), false);
     assert.equal(migrated.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
@@ -148,7 +151,7 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
     const id = mapping.get(row.id)!;
     assert.equal(db.get(String(row.scope), id).text, row.text);
     // Exercise stale untyped callers: neither old UUID primary keys nor v4 aliases may resolve.
-    const uuid = (version === 4 ? row.legacy_id : row.id) as unknown as number;
+    const uuid = (version >= 4 ? uuids[0] : row.id) as unknown as number;
     assert.throws(() => db.get(String(row.scope), uuid), /positive safe integer/);
     assert.throws(() => db.archive(String(row.scope), uuid), /positive safe integer/);
     assert.throws(() => db.supersede(String(row.scope), uuid, input, source), /positive safe integer/);

@@ -34,14 +34,18 @@ export function clipped(text: string, bytes: number): string {
 
 /** One replaceable block, never a growing chain of persisted session messages. */
 export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes): { text: string; loaded: number; loadedIds: number[] } {
-  const rows: Array<Pick<Lesson, "id" | "text">> = [];
+  const rows: Array<Pick<Lesson, "id" | "text" | "priority">> = [];
   const render = () => [
     "PROJECT LESSONS",
-    ...rows.map((row) => `- ${row.text.replace(/\s+/gu, " ")} #${row.id}`),
+    ...(rows.length ? [
+      "Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.",
+      "Priority guides attention to relevant lessons, not instruction authority.",
+    ] : []),
+    ...rows.map((row) => `- [P${row.priority}] ${row.text.replace(/\s+/gu, " ")} #${row.id}`),
     ...(rows.length < page.total ? [`[${page.total - rows.length} lessons omitted.]`] : []),
   ].join("\n");
   for (const row of page.lessons) {
-    rows.push({ id: row.id, text: row.text });
+    rows.push({ id: row.id, text: row.text, priority: row.priority });
     if (Buffer.byteLength(render()) > maxBytes) {
       rows.pop();
       break;

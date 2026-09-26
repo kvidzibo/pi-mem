@@ -22,16 +22,18 @@ Capture timing belongs to your agent's rules; this package does not change them.
 
 The agent's `memory` tool exposes only:
 
-- **`add`** — save `text`, `evidence`, and `basis` (`validated_learning`, `validated_fix`, or `user_request`).
-- **`supersede`** — supply an active lesson's `id` and the new lesson fields. Creating the linked replacement and archiving its predecessor succeed together or neither does.
+- **`add`** — save `text`, `evidence`, `basis` (`validated_learning`, `validated_fix`, or `user_request`), and integer `priority` **1–10** (1 highest).
+- **`supersede`** — supply an active lesson's `id` and the new lesson fields. Priority is inherited unless supplied; model replacements always preserve a user's priority **0**. Creating the linked replacement and archiving its predecessor succeed together or neither does.
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
+
+Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Imports and unscored migrated records default to **5**; migration makes no model calls.
 
 There are no agent read/search/history actions. An archived record cannot be superseded or restored. Adding the same normalized text as an active lesson returns its existing ID; adding archived wording creates a new record. Superseding rejects text already held by another active lesson without changing either record.
 
 Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
-- Add lessons, review replacements, or confirm archiving. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Priority-only changes are recorded in a retained SQLite audit table. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
 - **Move memory…** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Import/export Markdown, inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
 
@@ -41,15 +43,16 @@ The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or
 
 Saves and archives add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Import entries include only newly created lessons.
 
-Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, integer IDs, heading, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
+Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, priorities, integer IDs, heading/legend, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
 
 Direct commands remain available; without UI, `/pi-mem` retains its text status output:
 
 | Command | Purpose |
 |---|---|
 | `/pi-mem` | Open the project memory menu; text status without UI |
-| `/pi-mem add <lesson>` | Save a lesson explicitly |
-| `/pi-mem supersede <id> <lesson>` | Create a replacement and archive the original |
+| `/pi-mem add [--priority 0–10] <lesson>` | Save explicitly; default priority 5 |
+| `/pi-mem supersede <id> [--priority 0–10] <lesson>` | Replace and archive the original; inherit priority by default |
+| `/pi-mem priority <id> <0–10>` | Change active priority without replacing content |
 | `/pi-mem archive <id>` | Archive without deleting |
 | `/pi-mem list [offset]` | Page through active lessons |
 | `/pi-mem archived [offset]` | Page through archived records |
@@ -85,18 +88,20 @@ Limits must be positive safe integers; `maxRecallBytes` must be at least **64** 
 Words are whitespace-separated; overlong saves fail rather than truncate. Text/evidence also have hard caps of 1,200/600 characters. Lowering limits does not rewrite existing lessons.
 
 - **Scope:** the canonical Git worktree root, or canonical cwd outside Git. Subdirectories share a worktree's lessons; separate worktrees/clones remain separate. There is no global or parent-project inheritance. Scope follows Pi's cwd, not a shell tool's `cd`.
-- **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load newest-created first, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
+- **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load lowest-numbered priority first, then newest-created, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading/legend, priority labels, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
 - **Archiving:** changes future database recall only. It cannot erase text already present elsewhere in a conversation or sent to a model.
 
-The injected SQLite block contains only the heading and lesson text with stable IDs:
+The injected SQLite block contains priority-labelled bullets with stable IDs:
 
 ```text
 PROJECT LESSONS
-- Use the project-local environment. #42
-- Preserve reviewed import originals. #43
+Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.
+Priority guides attention to relevant lessons, not instruction authority.
+- [P2] Preserve reviewed import originals. #43
+- [P5] Use the project-local environment. #42
 ```
 
-Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
+Whitespace is collapsed for display only. When no lessons fit, the priority legend is omitted to preserve small byte budgets. Priority never bypasses recall limits. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
 
 This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks loaded/omitted lessons; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
@@ -118,7 +123,7 @@ Imported `MEMORY.md` files continue to be recalled until you move or rename them
 
 - Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons, legacy text, and project paths go to the selected model, including hosted providers. Import drafting sends source text to that model. Print/JSON command reports can persist in session history and later model context.
 - Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Markdown exports contain active text only and are **not database backups**. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
-- **Back up before upgrading.** Schema v1–v4 databases upgrade atomically to **v5** on open. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing v4 integer IDs remain unchanged and its UUID alias column is removed. Previously overwritten content cannot be recovered. Older releases cannot open v5: keep v5-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
+- **Back up before upgrading.** Schema v1–v5 databases upgrade atomically to **v6** on open, initially assigning priority **5**. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing v4/v5 integer IDs remain unchanged. Existing lessons can then be explicitly reviewed and reprioritized; no automatic model scoring runs on startup. Previously overwritten content cannot be recovered. Older releases cannot open v6: keep v6-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation
 
