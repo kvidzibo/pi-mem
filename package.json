@@ -1,15 +1,15 @@
 {
   "name": "@kvidzibo/pi-mem",
   "version": "0.1.0",
-  "private": true,
   "description": "SQLite-backed project memory for Pi",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "repository": { "type": "git", "url": "git+https://github.com/kvidzibo/pi-mem.git" },
   "homepage": "https://github.com/kvidzibo/pi-mem#readme",
   "bugs": { "url": "https://github.com/kvidzibo/pi-mem/issues" },
   "type": "module",
   "keywords": ["pi-package"],
-  "files": ["src", "README.md"],
+  "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=22.19.0" },
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
