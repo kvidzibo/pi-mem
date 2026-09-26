@@ -1,13 +1,10 @@
 import { join } from "node:path";
-import { estimateTokens, getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { estimateTokens, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
-import { exportMarkdown, exportPath } from "./markdown.ts";
-import { reviewedImport } from "./import-review.ts";
-import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
@@ -18,14 +15,12 @@ type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string;
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "archive", "archived", "import", "export", "reload", "help"];
+const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "archive", "archived", "reload", "help"];
 const HELP = [
   "/pi-mem — open the project memory menu (text status without UI)",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
   "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
-  "/pi-mem import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
-  "/pi-mem export <new-path> — active lesson text, no overwrite",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -33,18 +28,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let state: MenuState | undefined;
   let failed: Error | undefined;
   let notified: string | undefined;
-  let legacyNotified: string | undefined;
-  let importing: AbortController | undefined;
   let menu: AbortController | undefined;
   let generation = 0;
 
   function reset() {
     generation++;
     menu?.abort(new Error("Session or memory configuration changed; menu closed"));
-    // Keep the guard until the old command unwinds, including pending import dialogs.
-    importing?.abort(new Error("Session or memory configuration changed; import cancelled"));
-    importing = undefined;
-    legacyNotified = undefined;
     state?.store.close();
     state = undefined;
     failed = undefined;
@@ -164,59 +153,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   function recall(ctx: ExtensionContext): string {
-    const parts: string[] = [];
-    try { parts.push(snapshot(ctx).text); } catch (error) { parts.push(unavailable(error, ctx)); }
-    try {
-      // Legacy recall does not depend on a working SQLite configuration.
-      const scope = state?.cwd === ctx.cwd ? state.scope : projectScope(ctx.cwd);
-      const legacy = legacyContext(scope, ctx.cwd);
-      if (legacy.text) parts.push(legacy.text);
-      const noticeKey = legacy.warning + legacy.text;
-      if (legacy.warning && noticeKey !== legacyNotified) {
-        if (ctx.hasUI) ctx.ui.notify(legacy.warning, "warning");
-        else pi.sendMessage({ customType: "pi-mem-legacy-warning", content: legacy.warning, display: true }, { triggerTurn: false });
-      }
-      legacyNotified = noticeKey;
-    } catch (error) {
-      const warning = `Legacy memory unavailable: ${clipped(String(error instanceof Error ? error.message : error), 700)}`;
-      parts.push(warning);
-      if (warning !== legacyNotified && ctx.hasUI) ctx.ui.notify(warning, "warning");
-      legacyNotified = warning;
-    }
-    return parts.join("\n\n");
-  }
-
-  async function importFile(file: string, ctx: ExtensionContext) {
-    if (importing) throw new Error("An import is already in progress; cancel it or use /pi-mem reload");
-    const { store, path, scope, limits } = current(ctx);
-    const source = origin(ctx);
-    const controller = new AbortController();
-    importing = controller;
-    const started = generation;
-    const cwd = ctx.cwd;
-    const check = () => {
-      controller.signal.throwIfAborted();
-      if (generation !== started || state?.store !== store || state.scope !== scope || ctx.cwd !== cwd ||
-          ctx.sessionManager.getSessionId() !== source.session || projectScope(cwd) !== scope) {
-        throw new Error("Session or project changed; import cancelled");
-      }
-    };
-    try {
-      const result = await reviewedImport(ctx, { store, path, scope, cwd, limits,
-        file, origin: source, signal: controller.signal, check });
-      if (generation === started) {
-        if (result) recordSaved(result.createdIds, ctx);
-        // Imports require UI. Preserve all lesson IDs and hashes, even after a large batch.
-        ctx.ui.notify(result ? JSON.stringify(result, null, 2) : "Import cancelled; nothing saved.", "info");
-        try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
-      }
-    } finally {
-      if (importing === controller) importing = undefined;
-    }
+    try { return snapshot(ctx).text; } catch (error) { return unavailable(error, ctx); }
   }
 
   async function openMenu(ctx: ExtensionContext) {
-    if (menu || importing) throw new Error("A memory menu or import is already open; close it first");
+    if (menu) throw new Error("A memory menu is already open; close it first");
     while (true) {
       const controller = new AbortController();
       menu = controller;
@@ -242,7 +183,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
           refresh: () => { try { snapshot(ctx); } catch (error) { unavailable(error, ctx); } },
           saved: (ids) => recordSaved(ids, ctx),
           archived: (id) => recordArchived(id, ctx),
-          importFile: (file) => { check(); return importFile(file, ctx); },
         });
         check();
       } catch (error) {
@@ -281,7 +221,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.on("context", (event, ctx) => {
-    // Rebuilt from SQLite and cwd's legacy file(s): no stale recall after compaction or external edits.
+    // Rebuilt from SQLite: no stale recall after compaction or external edits.
     const messages = event.messages.filter((message) => message.role !== "custom" || message.customType !== CONTEXT_TYPE);
     return { messages: [{ role: "custom" as const, customType: CONTEXT_TYPE, content: recall(ctx), display: false, timestamp: 0 }, ...messages] };
   });
@@ -349,20 +289,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(`Database: ${JSON.stringify(path)}\n${recall(ctx)}`, ctx);
           return;
         }
-        if (command === "import") {
-          if (menu) throw new Error("A memory menu is already open; close it before running an import command");
-          const files = rest ? [rest] : legacyFiles(ctx.cwd);
-          if (files.length !== 1) throw new Error("Usage: /pi-mem import <path> (select exactly one source)");
-          await importFile(files[0], ctx);
-        } else if (command === "export") {
-          if (!rest) throw new Error("Usage: /pi-mem export <new-path>");
-          const output = exportPath(scope, ctx.cwd, rest);
-          const count = await withFileMutationQueue(output, async () => {
-            if (state?.store !== store || state.scope !== scope) throw new Error("Session changed before export");
-            return exportMarkdown(store, scope, output);
-          });
-          show({ output, lessons: count }, ctx);
-        } else if (command === "list" || command === "archived") {
+        if (command === "list" || command === "archived") {
           const offset = rest ? Number(rest) : 0;
           show(boundedPage(store.list(scope, { state: command === "archived" ? "archived" : "active", offset }), offset), ctx);
         } else if (command === "search") {

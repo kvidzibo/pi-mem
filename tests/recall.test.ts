@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { databasePath, memoryConfig } from "../src/config.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
-import { importMarkdown } from "../src/markdown.ts";
 import { runMemory } from "../src/operations.ts";
 import { boundedPage, formatTokens, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
 import { MemoryStore } from "../src/store.ts";
@@ -31,7 +30,7 @@ test("database path precedence is env, global extension config, then default; ba
   assert.throws(() => databasePath(dir, { PI_MEMORY_DB: "" }), /nonempty/);
 });
 
-test("word limits bound new writes and atomic imports without changing existing lessons", (t) => {
+test("word limits bound new writes without changing existing lessons", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-words-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const defaults = memoryConfig(dir, {});
@@ -51,9 +50,6 @@ test("word limits bound new writes and atomic imports without changing existing 
   assert.throws(() => db.add(dir, { ...input, evidence: text + " extra" }, origin), /evidence exceeds 20 words/);
   assert.throws(() => db.supersede(dir, saved.id, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
   assert.deepEqual(db.get(dir, saved.id), saved);
-  writeFileSync(join(dir, "lessons.md"), `- A valid new lesson.\n- ${text.replace(/\s+/gu, " ")} extra\n`);
-  assert.throws(() => importMarkdown(db, dir, dir, "lessons.md", origin), /text exceeds 20 words/);
-  assert.equal(db.list(dir).total, 1, "a rejected import must not partially save");
   db.close();
 
   writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxLessonWords: 21, maxEvidenceWords: 1 }));

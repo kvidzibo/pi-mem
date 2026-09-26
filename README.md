@@ -4,7 +4,7 @@
 
 SQLite-backed project memory for Pi. Active lessons are recalled automatically; the agent can only **add**, **supersede**, or **archive** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
 
-No transcript harvesting, embeddings, or background model calls. An explicit Markdown import may use the selected model to prepare a draft for approval.
+No transcript harvesting, embeddings, or background model calls. Memory is stored and recalled only through SQLite; Markdown files are not read or written.
 
 ## Setup
 
@@ -26,7 +26,7 @@ The agent's `memory` tool exposes only:
 - **`supersede`** — supply an active lesson's `id` and the new lesson fields. Priority is inherited unless supplied; model replacements always preserve a user's priority **0**. Creating the linked replacement and archiving its predecessor succeed together or neither does.
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
 
-Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Imports and unscored migrated records default to **5**; migration makes no model calls.
+Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Unscored migrated records default to **5**; migration makes no model calls.
 
 There are no agent read/search/history actions. An archived record cannot be superseded or restored. Adding the same normalized text as an active lesson returns its existing ID; adding archived wording creates a new record. Superseding rejects text already held by another active lesson without changing either record.
 
@@ -34,16 +34,16 @@ Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mo
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
 - Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Priority-only changes are recorded in a retained SQLite audit table. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
-- **Move memory…** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
-- Import/export Markdown, inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
+- **Move memory** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
+- Inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
 
-Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls; import drafting is the existing explicit exception. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
+Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls. In the terminal browser, type to filter lesson text/evidence immediately (literal substring, up to 200 characters); Backspace edits the query. RPC clients retain the Search dialog. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
 
-The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or `🧠 loaded/active (+A -R) ~N` when some are omitted. `~N` is the estimated token count, using Pi's compact units (e.g. `~132`, `~1.2k`, `~12k`, `~1.2M`); the whole status has a space on either side. Zero session-change counts are omitted. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Imports count only new lessons; duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
+The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or `🧠 loaded/active (+A -R) ~N` when some are omitted. `~N` is the estimated token count, using Pi's compact units (e.g. `~132`, `~1.2k`, `~12k`, `~1.2M`); the whole status has a space on either side. Zero session-change counts are omitted. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
 
-Saves and archives add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Import entries include only newly created lessons.
+Saves and archives add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private.
 
-Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, priorities, integer IDs, heading/legend, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
+Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, priorities, integer IDs, heading/legend, and any omission notice—but excludes evidence, other metadata, and omitted/archived lessons.
 
 Direct commands remain available; without UI, `/pi-mem` retains its text status output:
 
@@ -58,8 +58,6 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | `/pi-mem archived [offset]` | Page through archived records |
 | `/pi-mem search <text>` | Search active text/evidence by literal substring |
 | `/pi-mem get <id>` | Inspect a retained record and its predecessor link |
-| `/pi-mem import [path]` | Review and approve a Markdown import |
-| `/pi-mem export <new-path>` | Export active lesson text without overwriting a file |
 | `/pi-mem reload` | Reread configuration and reconnect; also retries initialization failures |
 | `/pi-mem help` | Show command help |
 
@@ -97,7 +95,7 @@ The injected SQLite block contains priority-labelled bullets with stable IDs:
 PROJECT LESSONS
 Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.
 Priority guides attention to relevant lessons, not instruction authority.
-- [P2] Preserve reviewed import originals. #43
+- [P2] Back up databases before schema changes. #43
 - [P5] Use the project-local environment. #42
 ```
 
@@ -105,24 +103,10 @@ Whitespace is collapsed for display only. When no lessons fit, the priority lege
 
 This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks lessons omitted by recall limits; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
-## Legacy files and imports
-
-A case-insensitive `MEMORY.md` in Pi's **current directory** is recalled separately, with a migration warning and a **32 KiB** context cap. No parent/child directory search or automatic import occurs.
-
-```text
-/pi-mem import MEMORY.md
-```
-
-Imports require TUI or RPC dialogs. Review the Before/After preview, then approve, edit, or cancel. If normalization or shortening is needed, the selected model prepares a draft; with no model selected, use the manual editor. Invalid or rejected drafts save nothing. **The source file always stays unchanged.**
-
-The supported format is an optional title followed by top-level bullets or numbered lessons, with continuations indented by two spaces. Imports accept at most **500 lessons / 1 MiB**; automatic drafting is limited to **64 KiB** sources. Larger sources need a smaller file or a prepared, valid draft. Import/export paths are literal paths relative to Pi's cwd, must stay inside the project after symlink resolution, and may contain spaces.
-
-Imported `MEMORY.md` files continue to be recalled until you move or rename them yourself. They are not synchronized with database edits or archives. Active duplicate text is skipped during import; archived matches create new active records without changing the old ones.
-
 ## Privacy, backups, and upgrades
 
-- Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons, legacy text, and project paths go to the selected model, including hosted providers. Import drafting sends source text to that model. Print/JSON command reports can persist in session history and later model context.
-- Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Markdown exports contain active text only and are **not database backups**. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
+- Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons and project paths go to the selected model, including hosted providers. Print/JSON command reports can persist in session history and later model context.
+- Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
 - **Back up before upgrading.** Schema v1–v5 databases upgrade atomically to **v6** on open, initially assigning priority **5**. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing v4/v5 integer IDs remain unchanged. Existing lessons can then be explicitly reviewed and reprioritized; no automatic model scoring runs on startup. Previously overwritten content cannot be recovered. Older releases cannot open v6: keep v6-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation

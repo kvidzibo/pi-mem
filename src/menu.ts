@@ -1,11 +1,9 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
-import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
-import { legacyContext, legacyFiles } from "./legacy.ts";
 import type { MemoryLimits } from "./limits.ts";
-import { exportMarkdown, exportPath } from "./markdown.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { clipped, memoryContext, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
@@ -25,7 +23,6 @@ interface MenuAccess {
   refresh: () => void;
   saved: (ids: number[]) => void;
   archived: (id: number) => void;
-  importFile: (file: string) => Promise<void>;
   signal: AbortSignal;
   origin: Origin;
   configPath: string;
@@ -150,23 +147,38 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     let selected: string | undefined;
     while (true) {
       const { store, scope, limits } = access.current();
-      let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
-      if (!page.lessons.length && offset > 0) {
-        offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
-        page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
-      }
-      const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
-      const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
-        `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
-      const body = [
-        query ? `Search: ${query}` : "All lessons · priority first, then newest",
-        page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
-        archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
-      ].join("\n");
-      const action = await choose(archived ? "Archived lessons" : "Browse / search lessons", body, [
-        ...rows, item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : []),
-        ...(offset ? [item("previous", "Previous page")] : []), ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
-      ], selected);
+      let nextOffset: number | null = null;
+      const listing = () => {
+        let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
+        if (!page.lessons.length && offset > 0) {
+          offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+          page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
+        }
+        nextOffset = page.nextOffset;
+        const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
+        const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
+          `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
+        const body = [
+          query ? `Search: ${query}` : "All lessons · priority first, then newest",
+          page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
+          archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
+        ].join("\n");
+        return { body, items: [
+          ...rows, ...(ctx.mode !== "tui" ? [item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : [])] : []),
+          ...(offset ? [item("previous", "Previous page")] : []), ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
+        ] };
+      };
+      const initial = listing();
+      access.check();
+      const action = await menuChoice(ctx, archived ? "Archived lessons" : "Browse / search lessons", initial.body, initial.items,
+        signal, selected, { query, update: (text) => {
+          access.check();
+          query = text.trim();
+          offset = 0;
+          selected = undefined;
+          return listing();
+        } });
+      access.check();
       if (!action || action === "back") return;
       if (action === "search") {
         const text = await ctx.ui.input("Search lesson text / evidence (literal substring, max 200 characters; blank clears)", query, { signal });
@@ -177,7 +189,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         catch (error) { reportError(error); continue; }
         query = nextQuery; offset = 0; selected = undefined;
       } else if (action === "clear") { query = ""; offset = 0; selected = undefined; }
-      else if (action === "next") { offset = page.nextOffset!; selected = undefined; }
+      else if (action === "next") { offset = nextOffset!; selected = undefined; }
       else if (action === "previous") { offset = Math.max(0, offset - PAGE_SIZE); selected = undefined; }
       else {
         selected = action;
@@ -228,10 +240,6 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         "Recall uses lowest-numbered priority first, then newest-created. Omitted lessons remain stored.",
         "Limits are read-only here. Changing the database path selects another store; it does not move data.");
     } catch (error) { lines.push(`Memory unavailable: ${errorText(error)}`, "Reload memory retries initialization."); }
-    try {
-      // Legacy inspection is independent of a working database/configuration.
-      lines.push("", legacyContext(projectScope(ctx.cwd), ctx.cwd).warning || "No legacy MEMORY.md found in Pi's cwd.");
-    } catch (error) { lines.push(`Legacy warning: ${errorText(error)}`); }
     await choose("Status & limits", lines.join("\n"), [BACK]);
   }
 
@@ -245,11 +253,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       const page = state.store.recall(state.scope);
       const recalled = memoryContext(page, state.limits.maxRecallBytes);
       summary = `${page.total} active · ${recalled.loaded} loaded into context`;
-      if (!page.total) summary += "\nNo lessons yet. Add a lesson or import Markdown.";
+      if (!page.total) summary += "\nNo lessons yet. Add a lesson.";
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("import", "Import Markdown…"), item("export", "Export Markdown…"), item("move", "Move memory…")] : []),
+        item("move", "Move memory")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -261,29 +269,6 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       else if (action === "browse" || action === "archived") await browse(action === "archived");
       else if (action === "add") await saveLesson();
       else if (action === "move") await moveMemory();
-      else if (action === "import") {
-        let source: string | undefined;
-        try { const files = legacyFiles(ctx.cwd); if (files.length === 1) source = files[0]; }
-        catch (error) { ctx.ui.notify(errorText(error), "warning"); }
-        const file = await ctx.ui.input("Import Markdown — project-relative path; blank uses detected MEMORY.md", source, { signal });
-        access.current();
-        if (file !== undefined) {
-          const path = file || source;
-          if (!path) throw new Error("Enter a Markdown source path");
-          await access.importFile(path);
-        }
-      } else if (action === "export") {
-        const file = await ctx.ui.input("Export active text (not a database backup) — new project-relative path, no overwrite", "memory-export.md", { signal });
-        if (file === undefined) continue;
-        const { store, scope, cwd } = access.current();
-        if (!file) throw new Error("Enter an export path");
-        const output = exportPath(scope, cwd, file);
-        const count = await withFileMutationQueue(output, async () => {
-          access.current();
-          return exportMarkdown(store, scope, output);
-        });
-        ctx.ui.notify(`Exported ${count} active lessons to ${JSON.stringify(output)}. This is not a database backup.`, "info");
-      }
     } catch (error) { access.check(); reportError(error); }
   }
 }

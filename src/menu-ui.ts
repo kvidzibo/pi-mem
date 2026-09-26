@@ -6,10 +6,12 @@ export const words = (text: string) => text.trim() ? text.trim().split(/\s+/u).l
 
 /** A scrollable read-only body and keyboard selector. Never writes a session message. */
 export async function menuChoice(ctx: ExtensionContext, title: string, body: string, items: SelectItem[],
-  signal: AbortSignal, selected?: string): Promise<string | undefined> {
+  signal: AbortSignal, selected?: string,
+  search?: { query: string; update: (query: string) => { body: string; items: SelectItem[] } }): Promise<string | undefined> {
   signal.throwIfAborted();
-  const safeItems = items.map((item) => ({ ...item, label: visible(item.label).replace(/\n/g, " "),
+  const sanitize = (rows: SelectItem[]) => rows.map((item) => ({ ...item, label: visible(item.label).replace(/\n/g, " "),
     description: item.description ? visible(item.description).replace(/\n/g, " ") : undefined }));
+  let safeItems = sanitize(items);
   if (ctx.mode !== "tui") {
     // RPC can render a select dialog, but not custom components. Labels must be unique.
     const labels = safeItems.map((item) => item.label);
@@ -18,6 +20,9 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
     return safeItems.find((item) => item.label === choice)?.value;
   }
   return ctx.ui.custom<string | undefined>((tui, theme, keys, done) => {
+    const input = new Input();
+    input.setValue(search?.query ?? "");
+    input.handleInput("\x05"); // Continue editing a restored query at its end.
     let index = Math.max(0, items.findIndex((item) => item.value === selected));
     let offset = 0;
     let bodyHeight = 1;
@@ -30,13 +35,15 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
     if (signal.aborted) queueMicrotask(cancel);
     const key = (id: Parameters<typeof keys.getKeys>[0]) => keys.getKeys(id).join("/");
     return {
+      get focused() { return input.focused; },
+      set focused(value: boolean) { input.focused = value; },
       render(width: number) {
         const w = Math.max(1, width);
         // Rebuild with the callback theme on every render, including after theme/size changes.
         bodyRows = body ? visible(body).split("\n").flatMap((line) => wrapTextWithAnsi(line, w)) : [];
         const height = Math.max(6, tui.terminal.rows - 5);
         listHeight = Math.max(1, Math.min(items.length, 10, Math.floor((height - 3) / (body ? 2 : 1))));
-        bodyHeight = Math.max(0, height - listHeight - 4);
+        bodyHeight = Math.max(0, height - listHeight - 4 - (search ? 2 : 0));
         offset = Math.max(0, Math.min(offset, bodyRows.length - bodyHeight));
         const list = new SelectList(safeItems, listHeight, {
           selectedPrefix: (s) => theme.fg("accent", s), selectedText: (s) => theme.fg("accent", s),
@@ -47,6 +54,7 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
         const scrollHint = scrolling ? ` · ${key("tui.select.pageUp")}/${key("tui.select.pageDown")} scroll text` : "";
         return [
           theme.fg("accent", theme.bold(visible(title).replace(/\n/g, " "))),
+          ...(search ? [theme.fg("dim", "Type to search text / evidence (max 200 characters)"), ...input.render(w)] : []),
           ...bodyRows.slice(offset, offset + bodyHeight),
           ...(scrolling ? [theme.fg("dim", `Text ${offset + 1}–${offset + bodyHeight}/${bodyRows.length}${scrollHint}`)] : []),
           ...list.render(Math.max(5, w)),
@@ -64,6 +72,24 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
         } else if (keys.matches(data, "tui.select.pageDown")) {
           if (bodyRows.length > bodyHeight) offset += Math.max(1, bodyHeight);
           else index = Math.min(items.length - 1, index + listHeight);
+        } else if (search) {
+          const previous = input.getValue();
+          input.handleInput(data);
+          const query = input.getValue().replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "").slice(0, 200);
+          if (query !== input.getValue()) input.setValue(query);
+          if (input.getValue() !== previous) {
+            try {
+              const result = search.update(input.getValue());
+              body = result.body;
+              items = result.items;
+              safeItems = sanitize(items);
+              index = 0;
+              offset = 0;
+            } catch (error) {
+              ctx.ui.notify(visible(error instanceof Error ? error.message : String(error)), "error");
+              return finish();
+            }
+          }
         }
         tui.requestRender();
       },
