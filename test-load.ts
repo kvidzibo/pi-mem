@@ -435,7 +435,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     const retained = observer.add(oldScope, { text: "Retained lesson.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
     observer.archive(oldScope, retained.id);
     for (const choice of ["Cancel", "Move memory"]) {
-      steps.push({ title: "Memory ·", choice: "Move memory…" },
+      steps.push({ title: "Memory ·", choice: "Move memory" },
         { title: "Move memory — select stored cwd", choice: oldScope },
         { title: "New cwd", match: new RegExp(project), text: destination },
         { title: "Move memory?", choice, match: /Move all 1 lessons/ },
