@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export function projectScope(cwd: string): string {
   const directory = realpathSync(cwd);
@@ -26,6 +27,14 @@ export function projectScope(cwd: string): string {
     }
     return directory;
   }
+}
+
+/** Resolve a human-entered move destination using the same scoping rules as recall. */
+export function moveDestination(cwd: string, entered: string): { path: string; scope: string } {
+  if (!entered.trim()) throw new Error("Enter an existing destination directory");
+  const path = resolve(cwd, entered === "~" ? homedir() : entered.startsWith("~/") ? resolve(homedir(), entered.slice(2)) : entered);
+  if (!statSync(path).isDirectory()) throw new Error("Destination must be a directory");
+  return { path, scope: projectScope(path) };
 }
 
 export function isInside(scope: string, file: string): boolean {

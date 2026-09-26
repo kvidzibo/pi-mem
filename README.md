@@ -34,6 +34,7 @@ Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mo
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
 - Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Priority-only changes are recorded in a retained SQLite audit table. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- **Move lesson…** in lesson details moves only that lesson and its linked replacement history (including any successor), preserving IDs and metadata. Unrelated lessons stay put. Nonempty destinations are allowed; duplicate active text is refused atomically. Available for active and archived lessons; the destination must be an existing directory and resolves to its canonical Git root or cwd.
 - **Move memory** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
 
@@ -54,6 +55,7 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | `/pi-mem supersede <id> [--priority 0–10] <lesson>` | Replace and archive the original; inherit priority by default |
 | `/pi-mem priority <id> <0–10>` | Change active priority without replacing content |
 | `/pi-mem archive <id>` | Archive without deleting |
+| `/pi-mem move <id> <destination-path>` | Move lesson and linked history, preserving IDs; path may contain spaces, without quotes |
 | `/pi-mem list [offset]` | Page through active lessons |
 | `/pi-mem archived [offset]` | Page through archived records |
 | `/pi-mem search <text>` | Search active text/evidence by literal substring |

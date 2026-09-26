@@ -472,6 +472,38 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.list(project, { query: "Keep" }).lessons[0].text, whitespace);
     assert.equal(notices.some((text) => /characters are escaped/.test(text)), false, "ordinary whitespace must not raise control-character warnings");
 
+    // Single-lesson moves include linked history, not unrelated lessons, and require menu approval.
+    const moveOrigin = { harness: "test", session: null };
+    const moveFirst = observer.add(project, { text: "Move this lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    const moveLast = observer.supersede(project, moveFirst.id,
+      { text: "Move corrected lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin);
+    const sourceCount = observer.list(project, { state: "all" }).total;
+    for (const choice of ["Cancel", "Move lesson"]) {
+      steps.push({ title: "Memory ·", choice: "Archived lessons" },
+        { title: "Archived lessons", search: "Move this", choice: "Move this lesson." },
+        { title: "Lesson details", choice: "Move lesson…" },
+        { title: "New cwd", text: destination },
+        { title: "Move lesson?", choice, match: /entire linked replacement history, including any successor/ });
+      if (choice === "Cancel") steps.push({ title: "Lesson details", choice: "Back" });
+      steps.push({ title: "Archived lessons", choice: "Back" }, { title: "Memory ·" });
+      await run();
+      const expectedScope = choice === "Cancel" ? project : destination;
+      assert.equal(observer.get(expectedScope, moveFirst.id).archived, true);
+      assert.deepEqual(observer.get(expectedScope, moveLast.id), { ...moveLast, scope: expectedScope });
+    }
+    assert.equal(observer.list(project, { state: "all" }).total, sourceCount - 2);
+    assert.equal(observer.get(destination, retained.id).archived, true, "occupied destination keeps unrelated history");
+    const spacedDestination = join(directory, "single lesson destination");
+    mkdirSync(spacedDestination);
+    ctx.cwd = destination;
+    await command.handler(`move #${moveLast.id} ${spacedDestination}`, ctx);
+    assert.deepEqual(observer.get(spacedDestination, moveLast.id), { ...moveLast, scope: spacedDestination });
+    assert.equal(observer.get(spacedDestination, moveFirst.id).archived, true);
+    assert.equal(observer.get(destination, retained.id).archived, true);
+    await command.handler(`move ${retained.id}`, ctx);
+    assert.match(notices.at(-1)!, /Usage: \/pi-mem move/);
+    ctx.cwd = project;
+
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
     const total = observer.list(project).total;
     steps.push({ title: "Memory ·", choice: "Add lesson" }, { title: "Add lesson", text: "Must not save." },
