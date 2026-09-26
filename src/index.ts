@@ -94,7 +94,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
       const count = result.loaded === page.total ? `${result.loaded}` : `${result.loaded}/${page.total}`;
       // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
-      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ◈~${tokens.toLocaleString("en-US")} \x1b[0m`);
+      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${tokens.toLocaleString("en-US")} \x1b[0m`);
     }
     notified = undefined;
     return result;
