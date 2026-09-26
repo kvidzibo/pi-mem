@@ -155,7 +155,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const replaced = lessons.filter((lesson) => lesson.supersedes_id !== null).length;
     const heading = theme.fg("success", `Memory ${replaced ? "replaced" : "added"} (+${lessons.length}${replaced ? ` -${replaced}` : ""})`);
     const lines = lessons.map((lesson) => `#${lesson.id}${lesson.supersedes_id ? ` (replaces #${lesson.supersedes_id})` : ""}: ${visible(lesson.text)}`);
-    return new Text([heading, ...lines].join("\n"), 0, 0);
+    return new Text([heading, ...lines].join("\n"), 1, 1, (text) => theme.bg("toolSuccessBg", text));
   });
 
   pi.registerEntryRenderer<ArchivedLesson>(ARCHIVED_TYPE, (entry, _options, theme) => {

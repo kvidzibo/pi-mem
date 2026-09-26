@@ -93,8 +93,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
-    const component = renderer(savedEntries()[0], { expanded: false }, { fg: (_color: string, text: string) => text });
-    assert.match(component.render(100).map((line: string) => line.trimEnd()).join("\n"),
+    const cardTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
+    const component = renderer(savedEntries()[0], { expanded: false }, cardTheme);
+    assert.match(component.render(100).map((line: string) => line.trim()).join("\n"),
       new RegExp(`Memory added \\(\\+1\\)\\n#${saved.id}: Test startup recall\\.`));
     for (const width of [1, 12, 40]) {
       assert.ok(component.render(width).every((line: string) => visibleWidth(line) <= width));
@@ -129,8 +130,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.notEqual(replacement.id, learned.id);
     assert.equal(savedEntries().length, 3);
     assert.deepEqual(savedEntries().at(-1)!.data, [{ id: replacement.id, text: "Replacement lesson.", supersedes_id: learned.id }]);
-    assert.match(renderer(savedEntries().at(-1), { expanded: false }, { fg: (_color: string, text: string) => text }).render(120)
-      .map((line: string) => line.trimEnd()).join("\n"),
+    assert.match(renderer(savedEntries().at(-1), { expanded: false }, cardTheme).render(120)
+      .map((line: string) => line.trim()).join("\n"),
       new RegExp(`Memory replaced \\(\\+1 -1\\)\\n#${replacement.id} \\(replaces #${learned.id}\\): Replacement lesson\\.`));
     assert.deepEqual(inspection.get(ctx.cwd, learned.id),
       { ...original, archived: true, archived_at: inspection.get(ctx.cwd, replacement.id).created_at });
@@ -658,7 +659,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
       { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
-        match: /\[loaded\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
+        match: /\[P5\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
       { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits/ },
       { title: "Browse / search", choice: "Back" },
       { title: "Memory ·" },

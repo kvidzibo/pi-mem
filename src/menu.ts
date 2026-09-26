@@ -157,11 +157,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       }
       const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
       const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
-        `${offset + index + 1}. [P${lesson.priority}] [${archived ? "archived" : loaded.has(lesson.id) ? "loaded" : "omitted"}] ${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
+        `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
       const body = [
         query ? `Search: ${query}` : "All lessons · priority first, then newest",
         page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
-        archived ? "Read-only retained records." : "Loaded/omitted reflects current recall limits; refreshed for each model request.",
+        archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
       ].join("\n");
       const action = await choose(archived ? "Archived lessons" : "Browse / search lessons", body, [
         ...rows, item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : []),
