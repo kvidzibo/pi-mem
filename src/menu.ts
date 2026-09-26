@@ -1,11 +1,9 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
-import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
-import { legacyContext, legacyFiles } from "./legacy.ts";
 import type { MemoryLimits } from "./limits.ts";
-import { exportMarkdown, exportPath } from "./markdown.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { clipped, memoryContext, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
@@ -25,7 +23,6 @@ interface MenuAccess {
   refresh: () => void;
   saved: (ids: number[]) => void;
   archived: (id: number) => void;
-  importFile: (file: string) => Promise<void>;
   signal: AbortSignal;
   origin: Origin;
   configPath: string;
@@ -243,10 +240,6 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         "Recall uses lowest-numbered priority first, then newest-created. Omitted lessons remain stored.",
         "Limits are read-only here. Changing the database path selects another store; it does not move data.");
     } catch (error) { lines.push(`Memory unavailable: ${errorText(error)}`, "Reload memory retries initialization."); }
-    try {
-      // Legacy inspection is independent of a working database/configuration.
-      lines.push("", legacyContext(projectScope(ctx.cwd), ctx.cwd).warning || "No legacy MEMORY.md found in Pi's cwd.");
-    } catch (error) { lines.push(`Legacy warning: ${errorText(error)}`); }
     await choose("Status & limits", lines.join("\n"), [BACK]);
   }
 
@@ -260,11 +253,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       const page = state.store.recall(state.scope);
       const recalled = memoryContext(page, state.limits.maxRecallBytes);
       summary = `${page.total} active · ${recalled.loaded} loaded into context`;
-      if (!page.total) summary += "\nNo lessons yet. Add a lesson or import Markdown.";
+      if (!page.total) summary += "\nNo lessons yet. Add a lesson.";
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("import", "Import Markdown…"), item("export", "Export Markdown…"), item("move", "Move memory…")] : []),
+        item("move", "Move memory…")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -276,29 +269,6 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       else if (action === "browse" || action === "archived") await browse(action === "archived");
       else if (action === "add") await saveLesson();
       else if (action === "move") await moveMemory();
-      else if (action === "import") {
-        let source: string | undefined;
-        try { const files = legacyFiles(ctx.cwd); if (files.length === 1) source = files[0]; }
-        catch (error) { ctx.ui.notify(errorText(error), "warning"); }
-        const file = await ctx.ui.input("Import Markdown — project-relative path; blank uses detected MEMORY.md", source, { signal });
-        access.current();
-        if (file !== undefined) {
-          const path = file || source;
-          if (!path) throw new Error("Enter a Markdown source path");
-          await access.importFile(path);
-        }
-      } else if (action === "export") {
-        const file = await ctx.ui.input("Export active text (not a database backup) — new project-relative path, no overwrite", "memory-export.md", { signal });
-        if (file === undefined) continue;
-        const { store, scope, cwd } = access.current();
-        if (!file) throw new Error("Enter an export path");
-        const output = exportPath(scope, cwd, file);
-        const count = await withFileMutationQueue(output, async () => {
-          access.current();
-          return exportMarkdown(store, scope, output);
-        });
-        ctx.ui.notify(`Exported ${count} active lessons to ${JSON.stringify(output)}. This is not a database backup.`, "info");
-      }
     } catch (error) { access.check(); reportError(error); }
   }
 }

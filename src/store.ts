@@ -6,6 +6,7 @@ import { DEFAULT_LIMITS, memoryLimits, type MemoryLimits } from "./limits.ts";
 
 export const MAX_TEXT = 1200;
 export const MAX_EVIDENCE = 600;
+// Keep historical import provenance readable without changing the retained database schema.
 export type Basis = "validated_learning" | "validated_fix" | "user_request" | "import";
 export type State = "active" | "archived" | "all";
 export interface Origin { harness: string; session: string | null }
@@ -351,18 +352,11 @@ export class MemoryStore {
     };
   }
 
-  activeTexts(scope: string): string[] {
-    this.checkScope(scope);
-    // A single SELECT is a consistent snapshot even while other sessions write.
-    return this.db.prepare("SELECT text FROM lessons WHERE scope = ? AND archived = 0 ORDER BY created_at DESC, id")
-      .all(scope).map((row) => String(row.text));
-  }
-
   add(scope: string, input: NewLesson, origin: Origin): { lesson: Lesson; created: boolean } {
     return this.addMany(scope, [input], origin)[0];
   }
 
-  /** Atomic import; invalid input or a failed insert leaves the whole batch unchanged. */
+  /** Atomic batch; invalid input or a failed insert leaves the whole batch unchanged. */
   addMany(scope: string, inputs: NewLesson[], origin: Origin): Array<{ lesson: Lesson; created: boolean }> {
     this.checkScope(scope);
     this.checkOrigin(origin);
