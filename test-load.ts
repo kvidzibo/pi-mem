@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -62,7 +63,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   try {
     extension = await load();
     assert.deepEqual([...extension.tools.keys()], ["memory"]);
-    assert.deepEqual([...extension.commands.keys()], ["memory"]);
+    assert.deepEqual([...extension.commands.keys()], ["pi-mem"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
     const emptyRecall = await event("context", { messages: [] });
@@ -160,7 +161,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     ctx.sessionManager.getSessionId = () => "load-session";
     await event("session_start", { reason: "resume" });
     expectStatus(1, 1, recall.messages[0].content, 3, 1);
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     await command.handler(`get ${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler(`get #${learned.id}`, ctx);
@@ -170,7 +171,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler("search Replacement", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).lessons[0].id, replacement.id);
     await command.handler(`restore ${learned.id}`, ctx);
-    assert.match(notices.at(-1)!, /\/memory —/);
+    assert.match(notices.at(-1)!, /\/pi-mem —/);
     assert.equal(inspection.get(ctx.cwd, learned.id).archived, true);
     ctx.cwd = join(directory, "other");
     await event("session_shutdown", { reason: "resume" });
@@ -342,7 +343,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
     assert.equal(modelCalls, 0, "discovery must never make a model call");
     assert.equal(observer.list(project).total, 0, "discovery must not import anything");
-    assert.match(notices.at(-1)!, /Legacy memory.*\/memory import MEMORY.md/);
+    assert.match(notices.at(-1)!, /Legacy memory.*\/pi-mem import MEMORY.md/);
     let recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /historical details/);
     assert.equal((await event("context", recall)).messages.length, 1);
@@ -355,7 +356,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     ctx.cwd = join(project, "src");
     assert.doesNotMatch((await event("context", { messages: [] })).messages[0].content, /historical details/);
     ctx.cwd = project;
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     await command.handler("import", ctx);
     assert.equal(modelCalls, 1);
     assert.match(diffs.at(-1)!, /Unstructured source → 2 proposed lessons/);
@@ -519,7 +520,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
         const component = await factory(tui, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keys,
           (value: unknown) => { result = value; finished = true; });
         try {
-          const screen = () => component.render(220).join("\n");
+          const screen = () => stripVTControlCharacters(component.render(220).join("\n"));
           assert.ok(screen().startsWith(step.title), `${step.title}: ${screen()}`);
           if (step.match) assert.match(screen(), step.match);
           if (step.text !== undefined) {
@@ -527,7 +528,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
             component.handleInput("\x01"); // Start of prefilled lesson.
             component.handleInput("\x0b"); // Clear the line without changing the main Pi editor.
             component.handleInput(`\x1b[200~${step.text}\x1b[201~`);
-            assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
+            if (!step.title.startsWith("New cwd")) assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
           }
           const full = screen();
           tui.terminal.rows = 12;
@@ -561,7 +562,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     observer.addMany(project, Array.from({ length: 12 }, (_, i) => ({ text: `Seed ${i}.`, evidence: "Verified.", basis: "user_request" as const })),
       { harness: "test", session: "seed-session" });
     const original = observer.list(project, { query: "Seed 0." }).lessons[0];
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     const run = async () => {
       await command.handler("", ctx);
       assert.equal(steps.length, 0, `unreached menu steps; notices: ${notices.join("\n\n")}`);
@@ -606,6 +607,23 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, 1,
       "only approved menu archives should add archive entries");
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
+
+    // Move lists even missing/archived-only scopes, prefills cwd, and preserves retained IDs.
+    const oldScope = join(directory, "missing-old-folder");
+    const destination = join(directory, "moved-folder");
+    mkdirSync(destination);
+    const retained = observer.add(oldScope, { text: "Retained lesson.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
+    observer.archive(oldScope, retained.id);
+    for (const choice of ["Cancel", "Move memory"]) {
+      steps.push({ title: "Memory ·", choice: "Move memory…" },
+        { title: "Move memory — select stored cwd", choice: oldScope },
+        { title: "New cwd", match: new RegExp(project), text: destination },
+        { title: "Move memory?", choice, match: /Move all 1 lessons/ },
+        { title: "Memory ·" });
+      await run();
+      assert.equal(observer.get(choice === "Cancel" ? oldScope : destination, retained.id).archived, true);
+    }
+    assert.equal(observer.listScopes().includes(oldScope), false);
 
     // Menu counts and per-lesson labels must honor bytes, not just the configured lesson count.
     writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: 64 }));
@@ -751,7 +769,7 @@ test("lesson-list imports preserve counts and require repaired drafts to be revi
     extension = await load();
     await event("session_start");
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     const run = async () => {
       await command.handler("import", ctx);
       assert.equal(decisions.length, 0, `all expected dialogs must be reached; last notice: ${notices.at(-1)}`);

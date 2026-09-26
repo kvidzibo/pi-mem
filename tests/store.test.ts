@@ -176,6 +176,29 @@ for (const version of [1, 2, 3, 4]) test(`schema ${version} upgrades discard UUI
   assert.deepEqual(db.get("/project", firstId), archived, "reopening must not renumber records");
 });
 
+test("scope listing and moves include archived lessons and preserve records atomically", (t) => {
+  const path = temporary(t);
+  const db = new MemoryStore(path);
+  const raw = new DatabaseSync(path);
+  t.after(() => { raw.close(); db.close(); });
+  const predecessor = db.add("/source", input, source).lesson;
+  const successor = db.supersede("/source", predecessor.id, { ...input, text: "Replacement lesson." }, source);
+  const archived = db.add("/archived-only", input, source).lesson;
+  db.archive("/archived-only", archived.id);
+  const before = db.list("/source", { state: "all" }).lessons;
+  assert.deepEqual(db.listScopes(), ["/archived-only", "/source"]);
+  assert.equal(db.moveScope("/source", "/destination"), 2);
+  assert.deepEqual(db.list("/destination", { state: "all" }).lessons,
+    before.map((row) => ({ ...row, scope: "/destination" })));
+  assert.deepEqual(db.listScopes(), ["/archived-only", "/destination"]);
+  assert.throws(() => db.moveScope("/missing", "/new"), /Source scope/);
+  assert.throws(() => db.moveScope("/destination", "/archived-only"), /occupied/);
+  assert.throws(() => db.moveScope("/destination", "/destination"), /differ/);
+  assert.throws(() => db.moveScope("relative", "/new"), /absolute/);
+  assert.throws(() => raw.exec("UPDATE lessons SET scope = '/tampered' WHERE id = 1"), /immutable/);
+  assert.equal(db.get("/destination", successor.id).supersedes_id, predecessor.id);
+});
+
 test("two connections cannot supersede an archived predecessor or lose its content", (t) => {
   const path = temporary(t);
   const one = new MemoryStore(path);
