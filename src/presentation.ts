@@ -3,6 +3,15 @@ import type { Lesson, Page, RecallPage } from "./store.ts";
 
 export const RESULT_BYTES = 16384;
 
+/** Match Pi's footer token units without depending on its private component exports. */
+export function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
 /** Render terminal controls and invisible formatting visibly in human-facing screens. */
 export function visible(text: string): string {
   return text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) => {

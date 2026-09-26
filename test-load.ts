@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MemoryStore } from "./src/store.ts";
+import { formatTokens } from "./src/presentation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +51,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   let inspection: MemoryStore | undefined;
   const expectStatus = (loaded: number, total: number, text: string, added = 0, archived = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
-    const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
+    const tokens = formatTokens(Math.ceil(text.length / 4));
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
     assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded === total ? loaded : `${loaded}/${total}`}${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
   };

@@ -7,8 +7,16 @@ import { databasePath, memoryConfig } from "../src/config.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
 import { importMarkdown } from "../src/markdown.ts";
 import { runMemory } from "../src/operations.ts";
-import { boundedPage, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
+import { boundedPage, formatTokens, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
 import { MemoryStore } from "../src/store.ts";
+
+test("footer token units match Pi's compact k/M thresholds", () => {
+  for (const [count, expected] of [[0, "0"], [132, "132"], [999, "999"], [1000, "1.0k"], [1234, "1.2k"],
+    [9999, "10.0k"], [10000, "10k"], [12600, "13k"], [999999, "1000k"], [1000000, "1.0M"],
+    [1234567, "1.2M"], [9999999, "10.0M"], [10000000, "10M"], [12600000, "13M"]] as const) {
+    assert.equal(formatTokens(count), expected);
+  }
+});
 
 test("database path precedence is env, global extension config, then default; bad config fails visibly", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-config-"));

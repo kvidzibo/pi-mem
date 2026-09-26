@@ -9,7 +9,7 @@ import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
-import { boundedPage, clipped, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
+import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
@@ -94,7 +94,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
       const count = result.loaded === page.total ? `${result.loaded}` : `${result.loaded}/${page.total}`;
       // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
-      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${tokens.toLocaleString("en-US")} \x1b[0m`);
+      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} \x1b[0m`);
     }
     notified = undefined;
     return result;
