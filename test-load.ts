@@ -52,7 +52,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-    assert.equal(statuses.at(-1), `memory ${loaded}/${total}${changes ? ` (${changes})` : ""} · ~${tokens} tok`);
+    assert.equal(statuses.at(-1), `🧠 ${loaded === total ? loaded : `${loaded}/${total}`}${changes ? ` (${changes})` : ""} · ~${tokens} tok`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -84,7 +84,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     }
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
-    assert.match(statuses.at(-1)!, /^memory 1\/1 \(\+1\) · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
+    assert.match(statuses.at(-1)!, /^🧠 1 \(\+1\) · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
@@ -216,7 +216,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     delete process.env.PI_MEMORY_DB;
     writeFileSync(join(directory, "pi-mem.json"), "invalid JSON");
     await event("session_start", { reason: "startup" });
-    assert.equal(statuses.at(-1), "memory unavailable");
+    assert.equal(statuses.at(-1), "🧠 unavailable");
     assert.match((await event("context", { messages: [user] })).messages[0].content, /Project memory unavailable/);
     await assert.rejects(execute({ ...input, basis: "user_request" }), /JSON/);
     writeFileSync(join(ctx.cwd, "MEMORY.md"), "- Legacy fallback survives database initialization failure.\n");
