@@ -1,12 +1,11 @@
 import { statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { clipped, memoryContext, visible } from "./presentation.ts";
-import { projectScope } from "./project.ts";
+import { moveDestination, projectScope } from "./project.ts";
 import { checkNew, DEFAULT_PRIORITY, type Lesson, type MemoryStore, type Origin } from "./store.ts";
 
 export interface MenuState {
@@ -109,14 +108,15 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
         `ID: #${lesson.id}`, `Predecessor: ${lesson.supersedes_id === null ? "(none)" : `#${lesson.supersedes_id}`}`,
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
-          "Archived records are read-only. No restore or delete."] : []),
+          "Archived records are read-only except for project moves. No restore or delete."] : []),
       ].join("\n");
-      const action = await choose("Lesson details", body, [BACK,
+      const action = await choose("Lesson details", body, [BACK, item("move", "Move lesson…"),
         ...(!lesson.archived ? [item("replace", "Replace…"), item("priority", "Change priority…"), item("archive", "Archive…")] : []),
         ...(lesson.supersedes_id ? [item("predecessor", "View predecessor")] : []),
       ]);
       if (!action || action === "back") { history.pop(); continue; }
       if (action === "predecessor") { history.push(lesson.supersedes_id!); continue; }
+      if (action === "move") { if (await moveLesson(lesson)) return; }
       if (action === "replace") { if (await saveLesson(lesson)) return; }
       if (action === "priority") {
         const priority = await choosePriority(lesson.priority);
@@ -199,6 +199,23 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     }
   }
 
+  async function moveLesson(lesson: Lesson): Promise<boolean> {
+    const entered = await destinationInput(ctx, ctx.cwd, signal);
+    access.check();
+    if (entered === undefined) return false;
+    const { path, scope: to } = moveDestination(ctx.cwd, entered);
+    if (lesson.scope === to) throw new Error("Source and destination are the same project");
+    const confirmed = await choose("Move lesson?", `#${lesson.id}: ${lesson.text}\n\nFrom: ${lesson.scope}\nTo: ${to}\n\nMove this lesson and its entire linked replacement history, including any successor. IDs and metadata stay unchanged.\nUnrelated lessons stay put. Duplicate active text is refused. No files move.`,
+      [CANCEL, item("move", "Move lesson")]);
+    if (confirmed !== "move") return false;
+    if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
+    const current = access.current();
+    const moved = current.store.moveLesson(current.scope, lesson.id, to);
+    access.refresh();
+    ctx.ui.notify(`Moved lesson #${lesson.id} and linked history (${moved} records) to ${JSON.stringify(to)}.`, "info");
+    return true;
+  }
+
   async function moveMemory() {
     const scopes = access.current().store.listScopes();
     const source = await choose("Move memory — select stored cwd", "Includes active and archived lessons. No folders or files are moved.",
@@ -209,10 +226,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     const entered = await destinationInput(ctx, ctx.cwd, signal);
     access.check();
     if (entered === undefined) return;
-    if (!entered.trim()) throw new Error("Enter an existing destination directory");
-    const path = resolve(ctx.cwd, entered === "~" ? homedir() : entered.startsWith("~/") ? resolve(homedir(), entered.slice(2)) : entered);
-    if (!statSync(path).isDirectory()) throw new Error("Destination must be a directory");
-    const to = projectScope(path);
+    const { path, scope: to } = moveDestination(ctx.cwd, entered);
     const { store } = access.current();
     if (from === to) throw new Error("Source and destination are the same project");
     if (store.list(to, { state: "all", limit: 1 }).total) throw new Error("Destination already has memories; nothing moved");

@@ -301,6 +301,36 @@ export class MemoryStore {
     });
   }
 
+  moveLesson(from: string, id: number, to: string): number {
+    this.checkScope(from);
+    this.checkScope(to);
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
+    if (from === to) throw new Error("Source and destination scopes must differ");
+    return this.transaction(() => {
+      const selected = this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? AND id = ?").get(from, id);
+      if (!selected) throw new Error("Lesson not found in this project");
+      // UNION deduplicates the bidirectional walk; no chain member can be left behind.
+      const chain = `WITH RECURSIVE chain(id, supersedes_id) AS (
+        SELECT id, supersedes_id FROM lessons WHERE scope = ? AND id = ?
+        UNION
+        SELECT l.id, l.supersedes_id FROM lessons l JOIN chain c
+          ON l.id = c.supersedes_id OR l.supersedes_id = c.id
+        WHERE l.scope = ?
+      )`;
+      const duplicate = this.db.prepare(`${chain}
+        SELECT 1 FROM lessons l JOIN chain c ON c.id = l.id JOIN lessons d
+          ON d.scope = ? AND d.archived = 0 AND l.archived = 0 AND d.text_key = l.text_key
+        LIMIT 1`).get(from, id, from, to);
+      if (duplicate) throw new Error("Duplicate active text in destination project");
+      this.db.exec("DROP TRIGGER lessons_immutable");
+      const result = this.db.prepare(`${chain}
+        UPDATE lessons SET scope = ? WHERE scope = ? AND id IN (SELECT id FROM chain)`)
+        .run(from, id, from, to, from);
+      this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
+      return Number(result.changes);
+    });
+  }
+
   get(scope: string, id: number): Lesson {
     this.checkScope(scope);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");

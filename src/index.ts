@@ -7,7 +7,7 @@ import { memoryConfig } from "./config.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
-import { projectScope } from "./project.ts";
+import { moveDestination, projectScope } from "./project.ts";
 import { checkedPriority, DEFAULT_PRIORITY, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
@@ -15,12 +15,13 @@ type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string;
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "archive", "archived", "reload", "help"];
+const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
 const HELP = [
   "/pi-mem — open the project memory menu (text status without UI)",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
   "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
+  "/pi-mem move <id> <destination-path> — move lesson and linked history; preserve IDs (path may contain spaces, no quotes)",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -297,6 +298,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(boundedPage(store.list(scope, { query: rest }), 0), ctx);
         } else if (command === "get") {
           show(store.get(scope, parseLessonId(rest)), ctx);
+        } else if (command === "move") {
+          const [value, destination] = firstWord(rest);
+          if (!destination) throw new Error("Usage: /pi-mem move <id> <destination-path>");
+          const id = parseLessonId(value);
+          const { scope: to } = moveDestination(ctx.cwd, destination);
+          const moved = store.moveLesson(scope, id, to);
+          show({ id, status: "moved", records: moved, from: scope, to }, ctx);
         } else if (command === "priority") {
           const [id, value] = firstWord(rest);
           if (!/^(?:[0-9]|10)$/.test(value)) throw new Error("Usage: /pi-mem priority <id> <0–10>");

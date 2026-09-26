@@ -202,6 +202,50 @@ test("scope listing and moves include archived lessons and preserve records atom
   assert.equal(db.get("/destination", successor.id).supersedes_id, predecessor.id);
 });
 
+test("moveLesson moves an archived lesson's full chain and rolls back destination duplicates", (t) => {
+  const path = temporary(t);
+  const db = new MemoryStore(path);
+  const raw = new DatabaseSync(path);
+  t.after(() => { raw.close(); db.close(); });
+  const first = db.add("/from", input, source).lesson;
+  const middle = db.supersede("/from", first.id, { ...input, text: "Middle linked lesson." }, source);
+  const last = db.supersede("/from", middle.id, { ...input, text: "Last linked lesson." }, source);
+  db.setPriority("/from", last.id, 2, source);
+  const unrelated = db.add("/from", { ...input, text: "Unrelated lesson." }, source).lesson;
+  const selected = db.get("/from", middle.id);
+  assert.equal(selected.archived, true);
+  const changes = raw.prepare("SELECT * FROM priority_changes WHERE lesson_id = ?").all(last.id);
+  const chain = [first, middle, last].map((row) => db.get("/from", row.id));
+  for (const badId of [0, true, "1", 1.5]) {
+    assert.throws(() => db.moveLesson("/from", badId as number, "/to"), /positive safe integer/);
+  }
+  assert.throws(() => db.moveLesson("/elsewhere", middle.id, "/to"), /not found/);
+  assert.throws(() => db.moveLesson("/from", middle.id, "/from"), /must differ/);
+  assert.throws(() => db.moveLesson("/from", middle.id, "relative"), /absolute project path/);
+  assert.equal(db.moveLesson("/from", middle.id, "/to"), 3);
+  for (const row of chain) {
+    assert.deepEqual(db.get("/to", row.id), { ...row, scope: "/to" });
+    assert.throws(() => db.get("/from", row.id), /not found/);
+  }
+  assert.deepEqual(db.get("/from", unrelated.id), unrelated);
+  assert.deepEqual(raw.prepare("SELECT * FROM priority_changes WHERE lesson_id = ?").all(last.id), changes);
+  const duplicate = db.add("/to", { ...input, text: "Collision text." }, source).lesson;
+  const active = db.add("/from", { ...input, text: "Collision   text." }, source).lesson;
+  assert.throws(() => db.moveLesson("/from", active.id, "/to"), /Duplicate active text/);
+  assert.deepEqual(db.get("/from", active.id), active);
+  assert.deepEqual(db.get("/to", duplicate.id), duplicate);
+  raw.exec(`CREATE TRIGGER fail_move BEFORE UPDATE OF scope ON lessons
+    WHEN NEW.scope = '/blocked' BEGIN SELECT RAISE(ABORT, 'blocked move'); END;`);
+  assert.throws(() => db.moveLesson("/to", last.id, "/blocked"), /blocked move/);
+  for (const row of chain) assert.deepEqual(db.get("/to", row.id), { ...row, scope: "/to" });
+  assert.throws(() => raw.exec("UPDATE lessons SET scope = '/tampered' WHERE id = 1"), /immutable/);
+  const reopened = new MemoryStore(path);
+  try {
+    assert.equal(reopened.get("/to", last.id).priority, 2);
+    assert.equal(reopened.get("/to", last.id).supersedes_id, middle.id);
+  } finally { reopened.close(); }
+});
+
 test("two connections cannot supersede an archived predecessor or lose its content", (t) => {
   const path = temporary(t);
   const one = new MemoryStore(path);
