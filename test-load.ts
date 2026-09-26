@@ -508,7 +508,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   mkdirSync(project);
   const notices: string[] = [];
   const messages: Array<{ content: string }> = [];
-  type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
+  type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
   let extension: Awaited<ReturnType<typeof load>>;
@@ -550,6 +550,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
             component.handleInput("\x7f");
             assert.match(screen(), /1–1 of 1/);
           }
+          for (let count = 0; count < (step.backspaces ?? 0); count++) component.handleInput("\x7f");
+          if (step.title === "Archived lessons" || step.title.startsWith("Browse / search")) assert.doesNotMatch(screen(), /Clear search/);
           if (step.match) assert.match(screen(), step.match);
           if (step.text !== undefined) {
             component.focused = true;
@@ -631,8 +633,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·", choice: "Archived lessons" },
       { title: "Archived lessons", search: "Corrected", choice: "Seed 0. Corrected." },
       { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
-      { title: "Archived lessons", choice: "Clear search", match: /Search: Corrected/ },
-      { title: "Archived lessons", choice: "Back", match: /1–2 of 2/ },
+      { title: "Archived lessons", backspaces: 9, choice: "Back", match: /All lessons[\s\S]*1–2 of 2/ },
       { title: "Memory ·", choice: "Status & limits" },
       { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 32 KiB/ },
       { title: "Memory ·" },

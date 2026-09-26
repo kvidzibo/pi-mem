@@ -167,7 +167,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
           archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
         ].join("\n");
         return { body, items: [
-          ...rows, ...(ctx.mode !== "tui" ? [item("search", "Search…")] : []), ...(query ? [item("clear", "Clear search")] : []),
+          ...rows, ...(ctx.mode !== "tui" ? [item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : [])] : []),
           ...(offset ? [item("previous", "Previous page")] : []), ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
         ] };
       };
