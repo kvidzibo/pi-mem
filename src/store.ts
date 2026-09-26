@@ -31,6 +31,10 @@ export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number
 
 const APPLICATION_ID = 0x504d454d; // PMEM
 const SCHEMA_VERSION = 5;
+const LESSONS_IMMUTABLE_TRIGGER = `CREATE TRIGGER lessons_immutable BEFORE UPDATE OF
+  id, scope, text, text_key, evidence, basis, source_harness, source_session,
+  created_at, updated_at, revision, supersedes_id ON lessons
+BEGIN SELECT RAISE(ABORT, 'Lesson content is immutable; supersede it instead'); END;`;
 
 export function checkedText(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) {
@@ -160,10 +164,7 @@ export class MemoryStore {
     this.db.exec(`
       CREATE UNIQUE INDEX lessons_active_text ON lessons(scope, text_key) WHERE archived = 0;
       CREATE INDEX lessons_recall ON lessons(scope, archived, created_at DESC, id);
-      CREATE TRIGGER lessons_immutable BEFORE UPDATE OF
-        id, scope, text, text_key, evidence, basis, source_harness, source_session,
-        created_at, updated_at, revision, supersedes_id ON lessons
-      BEGIN SELECT RAISE(ABORT, 'Lesson content is immutable; supersede it instead'); END;
+      ${LESSONS_IMMUTABLE_TRIGGER}
       CREATE TRIGGER lessons_archive_only BEFORE UPDATE OF archived, archived_at ON lessons
       WHEN OLD.archived != 0 OR NEW.archived != 1 OR NEW.archived_at IS NULL
       BEGIN SELECT RAISE(ABORT, 'Only active-to-archived transitions are allowed'); END;
@@ -215,6 +216,29 @@ export class MemoryStore {
     if (origin.session !== null) checkedText(origin.session, "source session", 160);
   }
 
+  listScopes(): string[] {
+    return this.db.prepare("SELECT DISTINCT scope FROM lessons ORDER BY scope").all().map((row) => String(row.scope));
+  }
+
+  moveScope(from: string, to: string): number {
+    this.checkScope(from);
+    this.checkScope(to);
+    if (from === to) throw new Error("Source and destination scopes must differ");
+    return this.transaction(() => {
+      if (!this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? LIMIT 1").get(from)) {
+        throw new Error("Source scope does not exist");
+      }
+      if (this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? LIMIT 1").get(to)) {
+        throw new Error("Destination scope is occupied");
+      }
+      const count = Number(this.db.prepare("SELECT count(*) AS n FROM lessons WHERE scope = ?").get(from)!.n);
+      this.db.exec("DROP TRIGGER lessons_immutable");
+      this.db.prepare("UPDATE lessons SET scope = ? WHERE scope = ?").run(to, from);
+      this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
+      return count;
+    });
+  }
+
   get(scope: string, id: number): Lesson {
     this.checkScope(scope);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
@@ -227,8 +251,8 @@ export class MemoryStore {
     this.checkScope(scope);
     const { state = "active", offset = 0, limit = 30 } = options;
     if (!["active", "archived", "all"].includes(state)) throw new Error("Invalid lesson state");
-    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 30) {
-      throw new Error("offset must be nonnegative; limit must be between 1 and 30");
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new Error("offset must be nonnegative; limit must be between 1 and 1000");
     }
     const query = options.query === undefined ? "" : checkedText(options.query, "query", 200);
     const where = `scope = ? AND (? = 'all' OR archived = ?) AND instr(lower(text || char(10) || evidence), lower(?)) > 0`;

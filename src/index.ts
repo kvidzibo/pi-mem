@@ -9,7 +9,7 @@ import { exportMarkdown, exportPath } from "./markdown.ts";
 import { reviewedImport } from "./import-review.ts";
 import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
-import { boundedPage, clipped, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
+import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
@@ -20,12 +20,12 @@ const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
 const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
-  "/memory — open the project memory menu (text status without UI)",
-  "/memory list [offset] | archived [offset] | search <text> | get <id>",
-  "/memory add <lesson> | supersede <id> <lesson> | archive <id>",
-  "/memory import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
-  "/memory export <new-path> — active lesson text, no overwrite",
-  "/memory reload — reconnect and reread database configuration",
+  "/pi-mem — open the project memory menu (text status without UI)",
+  "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
+  "/pi-mem add <lesson> | supersede <id> <lesson> | archive <id>",
+  "/pi-mem import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
+  "/pi-mem export <new-path> — active lesson text, no overwrite",
+  "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
 export default function memoryExtension(pi: ExtensionAPI) {
@@ -92,7 +92,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const { added, superseded } = store.sessionCreations(scope, origin(ctx));
       const archived = superseded + sessionArchives(ctx, path, scope);
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-      ctx.ui.setStatus("pi-mem", `memory ${result.loaded}/${page.total}${changes ? ` (${changes})` : ""} · ~${tokens.toLocaleString("en-US")} tok`);
+      const count = result.loaded === page.total ? `${result.loaded}` : `${result.loaded}/${page.total}`;
+      // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
+      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} \x1b[0m`);
     }
     notified = undefined;
     return result;
@@ -101,11 +103,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function unavailable(error: unknown, ctx: ExtensionContext): string {
     const message = clipped(String(error instanceof Error ? error.message : error), 700);
     if (ctx.hasUI) {
-      ctx.ui.setStatus("pi-mem", "memory unavailable");
-      if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. /memory reload retries.`, "warning");
+      ctx.ui.setStatus("pi-mem", "\x1b[0m 🧠 unavailable \x1b[0m");
+      if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. /pi-mem reload retries.`, "warning");
     }
     notified = message;
-    return `Project memory unavailable: ${JSON.stringify(message)}. No SQLite lessons were loaded. /memory reload retries.`;
+    return `Project memory unavailable: ${JSON.stringify(message)}. No SQLite lessons were loaded. /pi-mem reload retries.`;
   }
 
   function show(value: unknown, ctx: ExtensionContext) {
@@ -184,7 +186,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   }
 
   async function importFile(file: string, ctx: ExtensionContext) {
-    if (importing) throw new Error("An import is already in progress; cancel it or use /memory reload");
+    if (importing) throw new Error("An import is already in progress; cancel it or use /pi-mem reload");
     const { store, path, scope, limits } = current(ctx);
     const source = origin(ctx);
     const controller = new AbortController();
@@ -321,7 +323,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("memory", {
+  pi.registerCommand("pi-mem", {
     description: "Open the project memory menu, or use lesson subcommands",
     getArgumentCompletions(prefix) {
       return COMMANDS.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
@@ -341,10 +343,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (command === "import") {
           if (menu) throw new Error("A memory menu is already open; close it before running an import command");
           const files = rest ? [rest] : legacyFiles(ctx.cwd);
-          if (files.length !== 1) throw new Error("Usage: /memory import <path> (select exactly one source)");
+          if (files.length !== 1) throw new Error("Usage: /pi-mem import <path> (select exactly one source)");
           await importFile(files[0], ctx);
         } else if (command === "export") {
-          if (!rest) throw new Error("Usage: /memory export <new-path>");
+          if (!rest) throw new Error("Usage: /pi-mem export <new-path>");
           const output = exportPath(scope, ctx.cwd, rest);
           const count = await withFileMutationQueue(output, async () => {
             if (state?.store !== store || state.scope !== scope) throw new Error("Session changed before export");

@@ -15,7 +15,7 @@ test("legacy recall is cwd-only, case-insensitive, bounded, and rejects outside 
   let result = legacyContext(project, project);
   assert.match(result.text, /Unstructured legacy/);
   assert.doesNotMatch(result.text, /\x1b/);
-  assert.match(result.warning, /\/memory import Memory.md/);
+  assert.match(result.warning, /\/pi-mem import Memory.md/);
   assert.equal(legacyContext(project, child).text, "", "do not inherit a parent's legacy file");
   writeFileSync(join(dir, "external.md"), "Must never be recalled.");
   symlinkSync(join(dir, "external.md"), join(project, "memory.md"));

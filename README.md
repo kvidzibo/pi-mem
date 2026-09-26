@@ -28,38 +28,39 @@ The agent's `memory` tool exposes only:
 
 There are no agent read/search/history actions. An archived record cannot be superseded or restored. Adding the same normalized text as an active lesson returns its existing ID; adding archived wording creates a new record. Superseding rejects text already held by another active lesson without changing either record.
 
-Run **`/memory`** to open the project menu in TUI or RPC mode:
+Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
-- Browse/search active or archived lessons; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
+- Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
 - Add lessons, review replacements, or confirm archiving. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- **Move memory…** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Import/export Markdown, inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
 
 Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls; import drafting is the existing explicit exception. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
 
-The footer shows `memory loaded/active (+A -R) · ~N tok`, omitting zero counts. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Imports count only new lessons; duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
+The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or `🧠 loaded/active (+A -R) ~N` when some are omitted. `~N` is the estimated token count, using Pi's compact units (e.g. `~132`, `~1.2k`, `~12k`, `~1.2M`); the whole status has a space on either side. Zero session-change counts are omitted. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Imports count only new lessons; duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
 
 Saves and archives add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Import entries include only newly created lessons.
 
 Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, integer IDs, heading, and any omission notice—but excludes evidence, other metadata, omitted/archived lessons, and legacy `MEMORY.md`.
 
-Direct commands remain available; without UI, `/memory` retains its text status output:
+Direct commands remain available; without UI, `/pi-mem` retains its text status output:
 
 | Command | Purpose |
 |---|---|
-| `/memory` | Open the project memory menu; text status without UI |
-| `/memory add <lesson>` | Save a lesson explicitly |
-| `/memory supersede <id> <lesson>` | Create a replacement and archive the original |
-| `/memory archive <id>` | Archive without deleting |
-| `/memory list [offset]` | Page through active lessons |
-| `/memory archived [offset]` | Page through archived records |
-| `/memory search <text>` | Search active text/evidence by literal substring |
-| `/memory get <id>` | Inspect a retained record and its predecessor link |
-| `/memory import [path]` | Review and approve a Markdown import |
-| `/memory export <new-path>` | Export active lesson text without overwriting a file |
-| `/memory reload` | Reread configuration and reconnect; also retries initialization failures |
-| `/memory help` | Show command help |
+| `/pi-mem` | Open the project memory menu; text status without UI |
+| `/pi-mem add <lesson>` | Save a lesson explicitly |
+| `/pi-mem supersede <id> <lesson>` | Create a replacement and archive the original |
+| `/pi-mem archive <id>` | Archive without deleting |
+| `/pi-mem list [offset]` | Page through active lessons |
+| `/pi-mem archived [offset]` | Page through archived records |
+| `/pi-mem search <text>` | Search active text/evidence by literal substring |
+| `/pi-mem get <id>` | Inspect a retained record and its predecessor link |
+| `/pi-mem import [path]` | Review and approve a Markdown import |
+| `/pi-mem export <new-path>` | Export active lesson text without overwriting a file |
+| `/pi-mem reload` | Reread configuration and reconnect; also retries initialization failures |
+| `/pi-mem help` | Show command help |
 
-IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. UUIDs are discarded during migration and are no longer valid references. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
+IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. UUIDs are discarded during migration and are no longer valid references. Direct list/archived command pages return `nextOffset`; command output is capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
 
 `--no-session` still recalls memory. Agent writes in ephemeral sessions require `basis: "user_request"`; explicit user commands remain available.
 
@@ -77,7 +78,7 @@ Defaults, in `<Pi agent directory>/pi-mem.json` (normally `~/.pi/agent/pi-mem.js
 }
 ```
 
-`PI_MEMORY_DB` overrides the database path. Relative paths resolve against the Pi agent directory, **not the project**; `~` expands to the home directory and `PI_CODING_AGENT_DIR` is respected. Project-local configuration cannot redirect storage. Changing paths selects another store; it does not move data. Run `/memory reload` after configuration changes.
+`PI_MEMORY_DB` overrides the database path. Relative paths resolve against the Pi agent directory, **not the project**; `~` expands to the home directory and `PI_CODING_AGENT_DIR` is respected. Project-local configuration cannot redirect storage. Changing paths selects another store; it does not move data. Run `/pi-mem reload` after configuration changes.
 
 Limits must be positive safe integers; `maxRecallBytes` must be at least **64** to fit the recall heading and omission notice. It counts UTF-8 bytes, not tokens. For 100 short lessons, `maxRecallLessons: 100` with `maxRecallBytes: 32768` (32 KiB) is a reasonable starting budget; unusually long lessons may still be omitted.
 
@@ -95,16 +96,16 @@ PROJECT LESSONS
 - Preserve reviewed import originals. #43
 ```
 
-Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/memory` UI, not automatic recall.
+Whitespace is collapsed for display only. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
 
-This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/memory` marks loaded/omitted lessons; `/memory reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
+This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks loaded/omitted lessons; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
 ## Legacy files and imports
 
 A case-insensitive `MEMORY.md` in Pi's **current directory** is recalled separately, with a migration warning and a **32 KiB** context cap. No parent/child directory search or automatic import occurs.
 
 ```text
-/memory import MEMORY.md
+/pi-mem import MEMORY.md
 ```
 
 Imports require TUI or RPC dialogs. Review the Before/After preview, then approve, edit, or cancel. If normalization or shortening is needed, the selected model prepares a draft; with no model selected, use the manual editor. Invalid or rejected drafts save nothing. **The source file always stays unchanged.**

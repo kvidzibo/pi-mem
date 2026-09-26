@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,7 +42,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
   };
   const events: Event[] = [];
   const saveCards = () => events.filter((event) => event.type === "entry_appended" && event.entry?.customType === "pi-mem-saved");
-  const memoryStatus = () => events.filter((event) => event.method === "setStatus" && event.statusKey === "pi-mem").at(-1)?.statusText ?? "";
+  const memoryStatus = () => stripVTControlCharacters(events.filter((event) => event.method === "setStatus" && event.statusKey === "pi-mem").at(-1)?.statusText ?? "");
   let client = new RpcClient({ ...options, cwd: join(project, "src") });
   let allowImport = false;
   let reviewed = 0;
@@ -61,7 +62,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
       assert.match(event.title!, /^Add lesson/);
       staleInputId = event.id;
       inputOpened?.();
-      return; // Leave this input pending, then abort it through /memory reload.
+      return; // Leave this input pending, then abort it through /pi-mem reload.
     }
     if (event.method === "editor") {
       assert.match(event.prefill!, /Source: .*MEMORY.md/);
@@ -82,7 +83,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
           return;
         }
         browseRootSeen = true;
-        assert.equal(event.options?.length, 8);
+        assert.equal(event.options?.length, 9);
         assert.deepEqual(event.options?.slice(0, 5), ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…"]);
         value = "Browse / search lessons";
       } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
@@ -120,28 +121,28 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
   try {
     listen();
     await client.start();
-    assert.ok((await client.getCommands()).some((cmd: { name: string }) => cmd.name === "memory"));
-    const saved = JSON.parse(await command("/memory add A verified lesson from the RPC smoke test."));
+    assert.ok((await client.getCommands()).some((cmd: { name: string }) => cmd.name === "pi-mem"));
+    const saved = JSON.parse(await command("/pi-mem add A verified lesson from the RPC smoke test."));
     assert.equal(saved.status, "saved");
     assert.equal(saved.scope, project);
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1\) ·/);
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1\) ~/);
     assert.deepEqual(saveCards().map((event) => event.entry!.data), [[{ id: saved.id, text: "A verified lesson from the RPC smoke test.", supersedes_id: null }]]);
     assert.deepEqual(await client.getMessages(), [], "chat-only save entries must not become model messages");
-    assert.equal(JSON.parse(await command("/memory add A verified lesson from the RPC smoke test.")).status, "already exists");
-    await command("/memory reload");
+    assert.equal(JSON.parse(await command("/pi-mem add A verified lesson from the RPC smoke test.")).status, "already exists");
+    await command("/pi-mem reload");
     assert.equal(saveCards().length, 1, "duplicates and reload must not repeat save entries");
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1\) ·/);
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1\) ~/);
     assert.equal(events.some((event) => event.message?.startsWith("Legacy memory found")), false, "cwd subdirectories must not inherit legacy files");
     const before = await client.getState();
     assert.equal((await client.newSession()).cancelled, false);
     assert.notEqual((await client.getState()).sessionId, before.sessionId);
-    assert.match(memoryStatus(), /^memory 1\/1 ·/, "new sessions must not count earlier sessions' writes");
+    assert.match(memoryStatus(), /^ 🧠 1 ~/, "new sessions must not count earlier sessions' writes");
     const messagesBeforeBrowse = await client.getMessages();
     browseMenu = true;
     browseRootSeen = false;
     detailDone = false;
     const closed = new Promise<void>((resolve) => { menuClosed = resolve; });
-    await client.prompt("/memory");
+    await client.prompt("/pi-mem");
     await closed; // Prompt acceptance is not completion of an extension's dialog sequence.
     browseMenu = false;
     const messagesAfterBrowse = await client.getMessages();
@@ -152,56 +153,56 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     // A pending RPC lesson input must unwind on reload without blocking or overlapping a later menu.
     adding = true;
     const opened = new Promise<void>((resolve) => { inputOpened = resolve; });
-    const pendingAdd = client.prompt("/memory");
+    const pendingAdd = client.prompt("/pi-mem");
     await opened;
     assert.ok(staleInputId);
-    await command("/memory reload");
+    await command("/pi-mem reload");
     await pendingAdd;
     adding = false;
     browseMenu = true;
     browseRootSeen = true;
     const reopened = new Promise<void>((resolve) => { menuClosed = resolve; });
-    await client.prompt("/memory");
+    await client.prompt("/pi-mem");
     await reopened;
     browseMenu = false;
     client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: staleInputId, value: "Must not save stale text." }) + "\n");
-    assert.equal(JSON.parse(await command("/memory search Must not save stale text.")).total, 0);
-    assert.equal(JSON.parse(await command("/memory list")).total, 1);
+    assert.equal(JSON.parse(await command("/pi-mem search Must not save stale text.")).total, 0);
+    assert.equal(JSON.parse(await command("/pi-mem list")).total, 1);
     assert.deepEqual(await client.getMessages(), messagesBeforeBrowse);
-    const replacement = JSON.parse(await command(`/memory supersede ${saved.id} A verified lesson from the RPC smoke test.`));
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/, "superseding adds one and archives one in the current session");
-    assert.equal(JSON.parse(await command(`/memory archive ${saved.id}`)).changed, false);
-    await command("/memory reload");
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/);
+    const replacement = JSON.parse(await command(`/pi-mem supersede ${saved.id} A verified lesson from the RPC smoke test.`));
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1 -1\) ~/, "superseding adds one and archives one in the current session");
+    assert.equal(JSON.parse(await command(`/pi-mem archive ${saved.id}`)).changed, false);
+    await command("/pi-mem reload");
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1 -1\) ~/);
     assert.equal(saveCards().length, 2);
     await client.stop();
     client = new RpcClient({ ...options, cwd: project });
     listen();
     await client.start();
-    assert.match(await command("/memory reload"), /A verified lesson from the RPC smoke test/);
-    assert.ok(events.some((event) => event.message?.includes("/memory import MEMORY.md")));
-    assert.match(await command("/memory import"), /cancelled; nothing saved/);
-    assert.equal(JSON.parse(await command("/memory list")).total, 1);
+    assert.match(await command("/pi-mem reload"), /A verified lesson from the RPC smoke test/);
+    assert.ok(events.some((event) => event.message?.includes("/pi-mem import MEMORY.md")));
+    assert.match(await command("/pi-mem import"), /cancelled; nothing saved/);
+    assert.equal(JSON.parse(await command("/pi-mem list")).total, 1);
     assert.equal(removalOffers, 0);
     allowImport = true;
-    const imported = JSON.parse(await command("/memory import"));
+    const imported = JSON.parse(await command("/pi-mem import"));
     assert.equal(imported.imported, 1);
     assert.equal(imported.sourceRetained, true);
-    assert.match(memoryStatus(), /^memory 2\/2 \(\+1\) ·/);
+    assert.match(memoryStatus(), /^ 🧠 2 \(\+1\) ~/);
     assert.deepEqual(saveCards().at(-1)!.entry!.data, [{ id: imported.createdIds[0], text: "Preserve reviewed import originals.", supersedes_id: null }]);
     assert.equal(saveCards().length, 3, "cancelled imports and menu edits must not add save entries");
     assert.equal(reviewed, 2);
     assert.equal(removalOffers, 0, "successful imports must not offer source removal");
     assert.equal(readFileSync(join(project, "MEMORY.md"), "utf8"), legacy);
-    assert.equal(JSON.parse(await command(`/memory archive ${replacement.id}`)).changed, true);
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/, "one addition and one explicit archive keep separate counts");
+    assert.equal(JSON.parse(await command(`/pi-mem archive ${replacement.id}`)).changed, true);
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1 -1\) ~/, "one addition and one explicit archive keep separate counts");
     const archiveCards = () => events.filter((event) => event.type === "entry_appended" && event.entry?.customType === "pi-mem-archived");
     assert.equal(archiveCards().length, 1);
     assert.deepEqual(archiveCards()[0].entry!.data, { id: replacement.id, text: "A verified lesson from the RPC smoke test.",
       scope: project, database: env.PI_MEMORY_DB, session: (await client.getState()).sessionId });
-    assert.equal(JSON.parse(await command(`/memory archive ${replacement.id}`)).changed, false);
-    await command("/memory reload");
-    assert.match(memoryStatus(), /^memory 1\/1 \(\+1 -1\) ·/);
+    assert.equal(JSON.parse(await command(`/pi-mem archive ${replacement.id}`)).changed, false);
+    await command("/pi-mem reload");
+    assert.match(memoryStatus(), /^ 🧠 1 \(\+1 -1\) ~/);
     assert.equal(archiveCards().length, 1);
     assert.deepEqual(await client.getMessages(), [], "archive activity must not become model messages");
     await client.stop();
@@ -211,14 +212,14 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     browseMenu = true;
     browseRootSeen = true;
     const emptyClosed = new Promise<void>((resolve) => { menuClosed = resolve; });
-    await client.prompt("/memory");
+    await client.prompt("/pi-mem");
     await emptyClosed;
     browseMenu = false;
     const emptyMenu = events.find((event) => event.method === "select" && event.title?.startsWith("Memory · other"));
     assert.ok(emptyMenu);
     assert.match(emptyMenu!.title!, /0 active · 0 loaded into context/);
-    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…", "Status & limits", "Reload memory", "Help"]);
-    const recalled = await command("/memory reload");
+    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Import Markdown…", "Export Markdown…", "Move memory…", "Status & limits", "Reload memory", "Help"]);
+    const recalled = await command("/pi-mem reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
     assert.match(recalled, /^Database: .+\nPROJECT LESSONS$/);
     assert.equal(events.filter((event) => event.type === "agent_start" || event.type === "extension_error").length, 0);

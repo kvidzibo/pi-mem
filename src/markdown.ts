@@ -92,7 +92,7 @@ export function assertSourceUnchanged(scope: string, source: MarkdownSource): vo
   const now = readMarkdownSource(scope, scope, source.path);
   if (now.realpath !== source.realpath || now.sha256 !== source.sha256 || now.dev !== source.dev || now.ino !== source.ino ||
       now.mtimeMs !== source.mtimeMs || now.ctimeMs !== source.ctimeMs) {
-    throw new Error("Memory file changed since preview; nothing further changed. Run /memory import again");
+    throw new Error("Memory file changed since preview; nothing further changed. Run /pi-mem import again");
   }
 }
 

@@ -1,10 +1,12 @@
-import { basename } from "node:path";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, resolve } from "node:path";
 import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { legacyContext, legacyFiles } from "./legacy.ts";
 import type { MemoryLimits } from "./limits.ts";
 import { exportMarkdown, exportPath } from "./markdown.ts";
-import { lessonEditor, menuChoice, words } from "./menu-ui.ts";
+import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { clipped, memoryContext, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
 import { checkNew, type Lesson, type MemoryStore, type Origin } from "./store.ts";
@@ -33,7 +35,7 @@ interface MenuAccess {
 const item = (value: string, label: string): SelectItem => ({ value, label });
 const BACK = item("back", "Back");
 const CANCEL = item("cancel", "Cancel");
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 1000;
 const errorText = (error: unknown) => visible(clipped(error instanceof Error ? error.message : String(error), 1000));
 
 /** Human-only navigation: no session messages or direct model calls. */
@@ -161,6 +163,33 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     }
   }
 
+  async function moveMemory() {
+    const scopes = access.current().store.listScopes();
+    const source = await choose("Move memory — select stored cwd", "Includes active and archived lessons. No folders or files are moved.",
+      [...scopes.map((scope, index) => item(String(index), `${index + 1}. ${scope}`)), BACK]);
+    if (source === undefined || source === "back") return;
+    const from = scopes[Number(source)];
+    if (!from) return;
+    const entered = await destinationInput(ctx, ctx.cwd, signal);
+    access.check();
+    if (entered === undefined) return;
+    if (!entered.trim()) throw new Error("Enter an existing destination directory");
+    const path = resolve(ctx.cwd, entered === "~" ? homedir() : entered.startsWith("~/") ? resolve(homedir(), entered.slice(2)) : entered);
+    if (!statSync(path).isDirectory()) throw new Error("Destination must be a directory");
+    const to = projectScope(path);
+    const { store } = access.current();
+    if (from === to) throw new Error("Source and destination are the same project");
+    if (store.list(to, { state: "all", limit: 1 }).total) throw new Error("Destination already has memories; nothing moved");
+    const count = store.list(from, { state: "all", limit: 1 }).total;
+    const confirmed = await choose("Move memory?", `From: ${from}\nTo: ${to}\n\nMove all ${count} lessons, including archived history. IDs and predecessor links stay unchanged.\nThe destination uses its canonical Git root, or cwd outside Git. No merge or file move.`,
+      [CANCEL, item("move", "Move memory")]);
+    if (confirmed !== "move") return;
+    if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
+    const moved = access.current().store.moveScope(from, to);
+    access.refresh();
+    ctx.ui.notify(`Moved ${moved} lessons to ${JSON.stringify(to)}.`, "info");
+  }
+
   async function status() {
     const lines = [`Config: ${JSON.stringify(access.configPath)}`, `Pi cwd: ${JSON.stringify(ctx.cwd)}`];
     try {
@@ -196,7 +225,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("import", "Import Markdown…"), item("export", "Export Markdown…")] : []),
+        item("import", "Import Markdown…"), item("export", "Export Markdown…"), item("move", "Move memory…")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -207,6 +236,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       else if (action === "help") await choose("Memory help", access.help + "\n\nBrowsing stays in the UI; it does not add conversation messages.\nReplace and archive retain records. There is no restore or delete.", [BACK]);
       else if (action === "browse" || action === "archived") await browse(action === "archived");
       else if (action === "add") await saveLesson();
+      else if (action === "move") await moveMemory();
       else if (action === "import") {
         let source: string | undefined;
         try { const files = legacyFiles(ctx.cwd); if (files.length === 1) source = files[0]; }

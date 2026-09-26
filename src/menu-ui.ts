@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Editor, SelectList, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
+import { Editor, Input, SelectList, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { visible } from "./presentation.ts";
 
 export const words = (text: string) => text.trim() ? text.trim().split(/\s+/u).length : 0;
@@ -68,6 +68,41 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
         tui.requestRender();
       },
       invalidate() {},
+      dispose() { signal.removeEventListener("abort", cancel); },
+    };
+  });
+}
+
+/** Editable prefilled path in TUI; RPC input supports only placeholders, so blank keeps the default. */
+export async function destinationInput(ctx: ExtensionContext, initial: string, signal: AbortSignal): Promise<string | undefined> {
+  signal.throwIfAborted();
+  if (ctx.mode !== "tui") {
+    const value = await ctx.ui.input(`New cwd — existing directory; blank keeps ${visible(initial)}`, initial, { signal });
+    signal.throwIfAborted();
+    return value === "" ? initial : value;
+  }
+  return ctx.ui.custom<string | undefined>((tui, theme, keys, done) => {
+    const input = new Input();
+    input.setValue(initial);
+    let finished = false;
+    const finish = (value?: string) => { if (!finished) { finished = true; done(value); } };
+    const cancel = () => finish();
+    input.onSubmit = finish;
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) queueMicrotask(cancel);
+    return {
+      get focused() { return input.focused; },
+      set focused(value: boolean) { input.focused = value; },
+      render(width: number) {
+        return [theme.fg("accent", "New cwd — existing directory"), ...input.render(width),
+          theme.fg("dim", "Enter review · Escape cancel")].map((line) => truncateToWidth(line, width));
+      },
+      handleInput(data: string) {
+        if (keys.matches(data, "tui.select.cancel")) return finish();
+        input.handleInput(data);
+        tui.requestRender();
+      },
+      invalidate() { input.invalidate(); },
       dispose() { signal.removeEventListener("abort", cancel); },
     };
   });

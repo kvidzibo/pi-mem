@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -8,6 +9,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MemoryStore } from "./src/store.ts";
+import { formatTokens } from "./src/presentation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -49,9 +51,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   let inspection: MemoryStore | undefined;
   const expectStatus = (loaded: number, total: number, text: string, added = 0, archived = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
-    const tokens = Math.ceil(text.length / 4).toLocaleString("en-US");
+    const tokens = formatTokens(Math.ceil(text.length / 4));
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-    assert.equal(statuses.at(-1), `memory ${loaded}/${total}${changes ? ` (${changes})` : ""} · ~${tokens} tok`);
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded === total ? loaded : `${loaded}/${total}`}${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -62,7 +64,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   try {
     extension = await load();
     assert.deepEqual([...extension.tools.keys()], ["memory"]);
-    assert.deepEqual([...extension.commands.keys()], ["memory"]);
+    assert.deepEqual([...extension.commands.keys()], ["pi-mem"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
     const emptyRecall = await event("context", { messages: [] });
@@ -83,7 +85,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     }
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
-    assert.match(statuses.at(-1)!, /^memory 1\/1 \(\+1\) · ~[\d,]+ tok$/, "saving refreshes the footer immediately");
+    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
@@ -160,7 +162,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     ctx.sessionManager.getSessionId = () => "load-session";
     await event("session_start", { reason: "resume" });
     expectStatus(1, 1, recall.messages[0].content, 3, 1);
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     await command.handler(`get ${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler(`get #${learned.id}`, ctx);
@@ -170,7 +172,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler("search Replacement", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).lessons[0].id, replacement.id);
     await command.handler(`restore ${learned.id}`, ctx);
-    assert.match(notices.at(-1)!, /\/memory —/);
+    assert.match(notices.at(-1)!, /\/pi-mem —/);
     assert.equal(inspection.get(ctx.cwd, learned.id).archived, true);
     ctx.cwd = join(directory, "other");
     await event("session_shutdown", { reason: "resume" });
@@ -215,7 +217,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     delete process.env.PI_MEMORY_DB;
     writeFileSync(join(directory, "pi-mem.json"), "invalid JSON");
     await event("session_start", { reason: "startup" });
-    assert.equal(statuses.at(-1), "memory unavailable");
+    assert.equal(statuses.at(-1), "\x1b[0m 🧠 unavailable \x1b[0m");
     assert.match((await event("context", { messages: [user] })).messages[0].content, /Project memory unavailable/);
     await assert.rejects(execute({ ...input, basis: "user_request" }), /JSON/);
     writeFileSync(join(ctx.cwd, "MEMORY.md"), "- Legacy fallback survives database initialization failure.\n");
@@ -342,7 +344,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
     assert.equal(modelCalls, 0, "discovery must never make a model call");
     assert.equal(observer.list(project).total, 0, "discovery must not import anything");
-    assert.match(notices.at(-1)!, /Legacy memory.*\/memory import MEMORY.md/);
+    assert.match(notices.at(-1)!, /Legacy memory.*\/pi-mem import MEMORY.md/);
     let recall = await event("context", { messages: [] });
     assert.match(recall.messages[0].content, /historical details/);
     assert.equal((await event("context", recall)).messages.length, 1);
@@ -355,7 +357,7 @@ test("legacy recall and reviewed import preserve originals, require consent, and
     ctx.cwd = join(project, "src");
     assert.doesNotMatch((await event("context", { messages: [] })).messages[0].content, /historical details/);
     ctx.cwd = project;
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     await command.handler("import", ctx);
     assert.equal(modelCalls, 1);
     assert.match(diffs.at(-1)!, /Unstructured source → 2 proposed lessons/);
@@ -519,7 +521,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
         const component = await factory(tui, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keys,
           (value: unknown) => { result = value; finished = true; });
         try {
-          const screen = () => component.render(220).join("\n");
+          const screen = () => stripVTControlCharacters(component.render(220).join("\n"));
           assert.ok(screen().startsWith(step.title), `${step.title}: ${screen()}`);
           if (step.match) assert.match(screen(), step.match);
           if (step.text !== undefined) {
@@ -527,7 +529,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
             component.handleInput("\x01"); // Start of prefilled lesson.
             component.handleInput("\x0b"); // Clear the line without changing the main Pi editor.
             component.handleInput(`\x1b[200~${step.text}\x1b[201~`);
-            assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
+            if (!step.title.startsWith("New cwd")) assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
           }
           const full = screen();
           tui.terminal.rows = 12;
@@ -538,7 +540,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           component.invalidate();
           if (step.choice) {
             for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && line.includes(step.choice!)); count++) {
-              assert.ok(count < 40, `choice ${step.choice} not found: ${screen()}`);
+              assert.ok(count < 1020, `choice ${step.choice} not found: ${screen()}`);
               component.handleInput("\x1b[B");
             }
           }
@@ -558,19 +560,21 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     extension.runtime.sendMessage = (message: { content: string }) => messages.push(message);
     await event("session_start");
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
-    observer.addMany(project, Array.from({ length: 12 }, (_, i) => ({ text: `Seed ${i}.`, evidence: "Verified.", basis: "user_request" as const })),
-      { harness: "test", session: "seed-session" });
+    for (let offset = 0; offset < 1002; offset += 500) {
+      observer.addMany(project, Array.from({ length: Math.min(500, 1002 - offset) }, (_, i) => ({ text: `Seed ${offset + i}.`, evidence: "Verified.", basis: "user_request" as const })),
+        { harness: "test", session: "seed-session" });
+    }
     const original = observer.list(project, { query: "Seed 0." }).lessons[0];
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     const run = async () => {
       await command.handler("", ctx);
       assert.equal(steps.length, 0, `unreached menu steps; notices: ${notices.join("\n\n")}`);
       assert.equal(inputs.length, 0);
     };
     steps.push(
-      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
-      { title: "Browse / search", choice: "Next page", match: /1–10 of 12/ },
-      { title: "Browse / search", choice: "Search…", match: /11–12 of 12[\s\S]*\[omitted\]/ },
+      { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
+      { title: "Browse / search", choice: "Next page", match: /1–1000 of 1002/ },
+      { title: "Browse / search", choice: "Search…", match: /1001–1002 of 1002[\s\S]*\[omitted\]/ },
       { title: "Browse / search", choice: "Seed 0.", match: /Search: Seed 0\./ },
       { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
       { title: "Replace lesson", text: "Seed 0. Corrected.", match: /2\/5 words/ },
@@ -607,11 +611,28 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       "only approved menu archives should add archive entries");
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
 
+    // Move lists even missing/archived-only scopes, prefills cwd, and preserves retained IDs.
+    const oldScope = join(directory, "missing-old-folder");
+    const destination = join(directory, "moved-folder");
+    mkdirSync(destination);
+    const retained = observer.add(oldScope, { text: "Retained lesson.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
+    observer.archive(oldScope, retained.id);
+    for (const choice of ["Cancel", "Move memory"]) {
+      steps.push({ title: "Memory ·", choice: "Move memory…" },
+        { title: "Move memory — select stored cwd", choice: oldScope },
+        { title: "New cwd", match: new RegExp(project), text: destination },
+        { title: "Move memory?", choice, match: /Move all 1 lessons/ },
+        { title: "Memory ·" });
+      await run();
+      assert.equal(observer.get(choice === "Cancel" ? oldScope : destination, retained.id).archived, true);
+    }
+    assert.equal(observer.listScopes().includes(oldScope), false);
+
     // Menu counts and per-lesson labels must honor bytes, not just the configured lesson count.
     writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: 64 }));
     await command.handler("reload", ctx);
     steps.push(
-      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
+      { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
       { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
         match: /\[loaded\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
       { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits/ },
@@ -751,7 +772,7 @@ test("lesson-list imports preserve counts and require repaired drafts to be revi
     extension = await load();
     await event("session_start");
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
-    const command = extension.commands.get("memory");
+    const command = extension.commands.get("pi-mem");
     const run = async () => {
       await command.handler("import", ctx);
       assert.equal(decisions.length, 0, `all expected dialogs must be reached; last notice: ${notices.at(-1)}`);
