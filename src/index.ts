@@ -93,7 +93,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const archived = superseded + sessionArchives(ctx, path, scope);
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
       const count = result.loaded === page.total ? `${result.loaded}` : `${result.loaded}/${page.total}`;
-      ctx.ui.setStatus("pi-mem", `🧠 ${count}${changes ? ` (${changes})` : ""} · ~${tokens.toLocaleString("en-US")} tok`);
+      // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
+      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ◈~${tokens.toLocaleString("en-US")} \x1b[0m`);
     }
     notified = undefined;
     return result;
@@ -102,7 +103,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function unavailable(error: unknown, ctx: ExtensionContext): string {
     const message = clipped(String(error instanceof Error ? error.message : error), 700);
     if (ctx.hasUI) {
-      ctx.ui.setStatus("pi-mem", "🧠 unavailable");
+      ctx.ui.setStatus("pi-mem", "\x1b[0m 🧠 unavailable \x1b[0m");
       if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. /pi-mem reload retries.`, "warning");
     }
     notified = message;
