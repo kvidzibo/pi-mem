@@ -1,5 +1,7 @@
 # pi-mem
 
+[npm](https://www.npmjs.com/package/@kvidzibo/pi-mem) · [Pi package directory](https://pi.dev/packages)
+
 SQLite-backed project memory for Pi. Active lessons are recalled automatically; the agent can only **add**, **supersede**, or **archive** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
 
 No transcript harvesting, embeddings, or background model calls. An explicit Markdown import may use the selected model to prepare a draft for approval.
@@ -9,10 +11,10 @@ No transcript harvesting, embeddings, or background model calls. An explicit Mar
 Requires Pi **0.85.1+** (tested with 0.85.1), Node **22.19+**, and Git for repository scoping.
 
 ```bash
-pi install git:github.com/kvidzibo/pi-mem
+pi install npm:@kvidzibo/pi-mem
 ```
 
-For a local checkout, use `pi install /absolute/path/to/pi-mem`. Append `@<tag-or-commit>` to the Git source to pin a version. Load the package once through `packages`, not also through `extensions`, then run `/reload` in existing Pi sessions.
+Append `@<version>` to the npm source to pin a version. Git installation remains available with `pi install git:github.com/kvidzibo/pi-mem` (append `@<tag-or-commit>` to pin it). For a local checkout, use `pi install /absolute/path/to/pi-mem`. Load the package once through `packages`, not also through `extensions`, then run `/reload` in existing Pi sessions.
 
 Capture timing belongs to your agent's rules; this package does not change them. Configure selective saves of verified, reusable lessons during authorized work, or explicitly ask the agent to remember a lesson.
 
@@ -129,6 +131,12 @@ npm audit
 
 `npm test` runs TypeScript checks, storage tests, and Pi loader/RPC integration tests. UI/protocol checks use `xvfb-run`; tests use disposable databases and no live-model calls.
 
+## Publishing
+
+One-time bootstrap: after review, run `npm login` and `npm publish --ignore-scripts` for the first release. In npm package settings, add a GitHub Actions trusted publisher with owner **kvidzibo**, repository **pi-mem**, and workflow **publish.yml** (no environment). Allow direct `npm publish`. CI uses OIDC, not your local login or an npm token secret.
+
+For later releases, bump `package.json` and `package-lock.json` together (`npm version patch --no-git-tag-version`, or `minor`/`major`) in a PR. After merging, tag the merged commit with the matching `v<version>` and push that tag. `.github/workflows/publish.yml` tests on Node 22.19 and 24 before publishing publicly with provenance. Only stable versions are supported; mismatched tags fail before publishing. Do not tag the already-published bootstrap version: npm versions cannot be republished. Protect release tags so only maintainers can create them.
+
 ## License
 
-No open-source license has been selected. The package is `UNLICENSED` and `private`; installation from Git or a local path remains supported.
+[MIT](LICENSE).
