@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MemoryStore } from "./src/store.ts";
-import { formatTokens } from "./src/presentation.ts";
+import { formatTokens, memoryContext } from "./src/presentation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -72,10 +72,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
-    const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
+    const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
@@ -85,6 +85,10 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     }
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
+    for (const priority of [0, 11, -1, 1.5, true, false, "1", null, [], {}]) {
+      await assert.rejects(execute({ ...input, priority }), /priority must/);
+    }
+    await assert.rejects(execute({ ...input, priority: undefined }), /priority must/);
     assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
@@ -235,16 +239,16 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler("reload", ctx);
     const limitedRecall = (await event("context", { messages: [user] })).messages[0].content;
     const [sqliteRecall, legacyRecall] = limitedRecall.split("\n\n");
-    assert.match(sqliteRecall, /^PROJECT LESSONS\n- /);
+    assert.match(sqliteRecall, /^PROJECT LESSONS\nPriority: .*\nPriority guides .*\n- \[P5\] /);
     assert.match(sqliteRecall, /\n\[2 lessons omitted\.\]$/);
     assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     assert.match(legacyRecall, /Legacy Markdown memory/);
     expectStatus(1, 3, sqliteRecall, 3); // Omitted lessons and separately recalled legacy text do not inflate token counts.
-    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: 64 }));
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: Buffer.byteLength(sqliteRecall) }));
     await command.handler("reload", ctx);
     const byteLimitedRecall = (await event("context", { messages: [user] })).messages[0].content.split("\n\n")[0];
     assert.equal(byteLimitedRecall, sqliteRecall, "the byte budget must apply even without a one-lesson count limit");
-    assert.ok(Buffer.byteLength(byteLimitedRecall) <= 64);
+    assert.ok(Buffer.byteLength(byteLimitedRecall) <= Buffer.byteLength(sqliteRecall));
     expectStatus(1, 3, byteLimitedRecall, 3);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
@@ -268,6 +272,17 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     writeFileSync(join(ctx.cwd, "low evidence.md"), "- Compact imports work.\n");
     await command.handler("import low evidence.md", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).imported, 1, "generated import evidence must fit even when the filename contains spaces");
+    await command.handler("add --priority 0 Extreme human lesson.", ctx);
+    const extreme = JSON.parse(notices.at(-1)!);
+    assert.equal(inspection.get(ctx.cwd, extreme.id).priority, 0);
+    const extremeReplacement = JSON.parse((await execute({ ...input, action: "supersede", id: extreme.id,
+      text: "Corrected extreme lesson.", evidence: "Verified.", basis: "user_request", priority: 10 })).content[0].text);
+    assert.equal(extremeReplacement.priority, 0);
+    await command.handler(`priority ${extremeReplacement.id} 7`, ctx);
+    assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
+    await command.handler(`priority ${extremeReplacement.id} false`, ctx);
+    assert.match(notices.at(-1)!, /Usage:/);
+    assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
   } finally {
     await event("session_shutdown", { reason: "quit" });
     inspection?.close();
@@ -593,7 +608,15 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·", choice: "Add lesson" },
       { title: "Add lesson", text: "These six words exceed the limit." },
       { title: "Add lesson", text: "New menu lesson." },
-      { title: "Review new lesson", choice: "Save" },
+      { title: "Review new lesson", choice: "Priority…", match: /Priority: 5/ },
+      { title: "Lesson priority", choice: "0 — Extreme" },
+      { title: "Review new lesson", choice: "Save", match: /Priority: 0/ },
+      { title: "Memory ·", choice: "Browse / search lessons" },
+      { title: "Browse / search", choice: "New menu lesson.", match: /\[P0\]/ },
+      { title: "Lesson details", choice: "Change priority…", match: /Priority: 0/ },
+      { title: "Lesson priority", choice: "5" },
+      { title: "Lesson details", choice: "Back", match: /Priority: 5/ },
+      { title: "Browse / search", choice: "Back" },
       { title: "Memory ·", choice: "Status & limits" },
       { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 32 KiB/ },
       { title: "Memory ·" },
@@ -629,7 +652,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.listScopes().includes(oldScope), false);
 
     // Menu counts and per-lesson labels must honor bytes, not just the configured lesson count.
-    writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: 64 }));
+    const oneLessonBytes = Buffer.byteLength(memoryContext({ lessons: observer.list(project, { limit: 1 }).lessons, total: 1002 }).text);
+    writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: oneLessonBytes }));
     await command.handler("reload", ctx);
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },

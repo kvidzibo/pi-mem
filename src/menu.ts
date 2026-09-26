@@ -9,7 +9,7 @@ import { exportMarkdown, exportPath } from "./markdown.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { clipped, memoryContext, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
-import { checkNew, type Lesson, type MemoryStore, type Origin } from "./store.ts";
+import { checkNew, DEFAULT_PRIORITY, type Lesson, type MemoryStore, type Origin } from "./store.ts";
 
 export interface MenuState {
   store: MemoryStore;
@@ -49,26 +49,41 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
   };
   const reportError = (error: unknown) => ctx.ui.notify(errorText(error), "error");
 
+  async function choosePriority(current: number): Promise<number | undefined> {
+    const result = await choose("Lesson priority", "0 = user-reserved extreme · 1 = highest · 10 = lowest",
+      [...Array.from({ length: 11 }, (_, priority) => item(String(priority),
+        `${priority}${priority === 0 ? " — Extreme (user-only)" : priority === 1 ? " — Highest" : priority === 10 ? " — Lowest" : ""}`)), CANCEL], String(current));
+    return result === undefined || result === "cancel" ? undefined : Number(result);
+  }
+
   async function saveLesson(previous?: Lesson): Promise<boolean> {
     let draft = previous?.text ?? "";
+    let priority = previous?.priority ?? DEFAULT_PRIORITY;
+    let editing = true;
     while (true) {
       const { limits } = access.current();
-      const edited = await lessonEditor(ctx, previous ? "Replace lesson" : "Add lesson", draft, limits.maxLessonWords, signal);
+      const edited = editing ? await lessonEditor(ctx, previous ? "Replace lesson" : "Add lesson", draft, limits.maxLessonWords, signal) : draft;
+      editing = true;
       access.check();
       if (edited === undefined) return false;
       draft = edited;
       let input;
-      try { input = checkNew({ text: draft, evidence: "User-requested.", basis: "user_request" }, limits); }
+      try { input = checkNew({ text: draft, evidence: "User-requested.", basis: "user_request", priority }, limits); }
       catch (error) { reportError(error); continue; }
       const body = [
         ...(previous ? ["BEFORE", previous.text, "", "AFTER"] : []), input.text, "",
-        `${words(input.text)}/${limits.maxLessonWords} words · Evidence: ${input.evidence}`,
+        `${words(input.text)}/${limits.maxLessonWords} words · Evidence: ${input.evidence} · Priority: ${priority}`,
         previous ? "Saving creates a replacement and archives the original. Both records are retained." : "Save this lesson to the current project's memory?",
       ].join("\n");
       const action = await choose(previous ? "Review replacement" : "Review new lesson", body,
-        [CANCEL, item("edit", "Edit…"), item("save", "Save")]);
+        [CANCEL, item("edit", "Edit…"), item("priority", "Priority…"), item("save", "Save")]);
       if (!action || action === "cancel") return false;
       if (action === "edit") continue;
+      if (action === "priority") {
+        priority = await choosePriority(priority) ?? priority;
+        editing = false;
+        continue;
+      }
       const { store, scope } = access.current();
       if (previous) {
         const replacement = store.supersede(scope, previous.id, input, access.origin);
@@ -91,7 +106,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       const lesson = store.get(scope, history.at(-1)!);
       const loaded = memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds.includes(lesson.id);
       const body = [
-        lesson.text, "", `Evidence: ${lesson.evidence}`, "",
+        lesson.text, "", `Priority: ${lesson.priority}${lesson.priority === 0 ? " (user-reserved extreme)" : ""}`, `Evidence: ${lesson.evidence}`, "",
         `State: ${lesson.archived ? "archived (not recalled)" : loaded ? "active · loaded into recall" : "active · omitted by recall limits"}`,
         `Created: ${new Date(lesson.created_at).toISOString()}`, `Basis: ${lesson.basis}`,
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
@@ -100,12 +115,21 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
           "Archived records are read-only. No restore or delete."] : []),
       ].join("\n");
       const action = await choose("Lesson details", body, [BACK,
-        ...(!lesson.archived ? [item("replace", "Replace…"), item("archive", "Archive…")] : []),
+        ...(!lesson.archived ? [item("replace", "Replace…"), item("priority", "Change priority…"), item("archive", "Archive…")] : []),
         ...(lesson.supersedes_id ? [item("predecessor", "View predecessor")] : []),
       ]);
       if (!action || action === "back") { history.pop(); continue; }
       if (action === "predecessor") { history.push(lesson.supersedes_id!); continue; }
       if (action === "replace") { if (await saveLesson(lesson)) return; }
+      if (action === "priority") {
+        const priority = await choosePriority(lesson.priority);
+        if (priority !== undefined) {
+          const current = access.current();
+          current.store.setPriority(current.scope, lesson.id, priority, access.origin);
+          access.refresh();
+          ctx.ui.notify(`Lesson #${lesson.id} priority: ${priority}. Content unchanged.`, "info");
+        }
+      }
       if (action === "archive") {
         const confirmed = await choose("Archive lesson?", `${lesson.text}\n\nExclude this lesson from future recall; retain the record.\nThis cannot erase text already in a conversation. There is no restore operation.`,
           [CANCEL, item("archive", "Archive")]);
@@ -133,9 +157,9 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       }
       const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
       const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
-        `${offset + index + 1}. [${archived ? "archived" : loaded.has(lesson.id) ? "loaded" : "omitted"}] ${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
+        `${offset + index + 1}. [P${lesson.priority}] [${archived ? "archived" : loaded.has(lesson.id) ? "loaded" : "omitted"}] ${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
       const body = [
-        query ? `Search: ${query}` : "All lessons · newest first",
+        query ? `Search: ${query}` : "All lessons · priority first, then newest",
         page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
         archived ? "Read-only retained records." : "Loaded/omitted reflects current recall limits; refreshed for each model request.",
       ].join("\n");
@@ -201,7 +225,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         `Archived: ${store.list(scope, { state: "archived", limit: 1 }).total}`,
         `Lesson limit: ${limits.maxLessonWords} words · Evidence limit: ${limits.maxEvidenceWords} words`,
         `Recall limit: ${limits.maxRecallLessons} lessons or ${limits.maxRecallBytes / 1024} KiB, whichever fills first.`,
-        "Recall uses newest-created lessons first. Omitted lessons remain stored.",
+        "Recall uses lowest-numbered priority first, then newest-created. Omitted lessons remain stored.",
         "Limits are read-only here. Changing the database path selects another store; it does not move data.");
     } catch (error) { lines.push(`Memory unavailable: ${errorText(error)}`, "Reload memory retries initialization."); }
     try {

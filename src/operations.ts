@@ -1,4 +1,4 @@
-import { MemoryStore, type Basis, type Origin } from "./store.ts";
+import { checkedPriority, MemoryStore, type Basis, type Origin } from "./store.ts";
 
 export const ACTIONS = ["add", "supersede", "archive"] as const;
 export interface MemoryRequest {
@@ -6,6 +6,7 @@ export interface MemoryRequest {
   id?: number;
   text?: string;
   evidence?: string;
+  priority?: number;
   basis?: Exclude<Basis, "import">;
 }
 
@@ -17,13 +18,14 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
       if (request.basis !== "validated_learning" && request.basis !== "validated_fix" && request.basis !== "user_request") {
         throw new Error("add/supersede requires basis: validated_learning, validated_fix, or user_request");
       }
-      const input = { text: request.text!, evidence: request.evidence!, basis: request.basis };
+      if (request.action === "add" || request.priority !== undefined) checkedPriority(request.priority, 1);
+      const input = { text: request.text!, evidence: request.evidence!, basis: request.basis, priority: request.priority };
       if (request.action === "add") {
         const result = store.add(scope, input, origin);
-        return { id: result.lesson.id, status: result.created ? "saved" : "already exists", scope };
+        return { id: result.lesson.id, priority: result.lesson.priority, status: result.created ? "saved" : "already exists", scope };
       }
-      const result = store.supersede(scope, parseLessonId(request.id), input, origin);
-      return { id: result.id, supersedes_id: result.supersedes_id, status: "superseded", scope };
+      const result = store.supersede(scope, parseLessonId(request.id), input, origin, true);
+      return { id: result.id, priority: result.priority, supersedes_id: result.supersedes_id, status: "superseded", scope };
     }
     case "archive": {
       const result = store.archive(scope, parseLessonId(request.id));

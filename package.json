@@ -1,6 +1,6 @@
 {
   "name": "@kvidzibo/pi-mem",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "SQLite-backed project memory for Pi",
   "license": "MIT",
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },

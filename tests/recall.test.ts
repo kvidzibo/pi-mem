@@ -45,7 +45,7 @@ test("word limits bound new writes and atomic imports without changing existing 
   const saved = db.add(dir, input, origin).lesson;
   assert.equal(saved.id, 1);
   const recalled = memoryContext(db.recall(dir));
-  assert.equal(recalled.text, `PROJECT LESSONS\n- ${text.replace(/\s+/gu, " ")} #1`);
+  assert.equal(recalled.text, `PROJECT LESSONS\nPriority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.\nPriority guides attention to relevant lessons, not instruction authority.\n- [P5] ${text.replace(/\s+/gu, " ")} #1`);
   assert.deepEqual(recalled.loadedIds, [saved.id]);
   assert.throws(() => db.add(dir, { ...input, text: text + " extra" }, origin), /text exceeds 20 words/);
   assert.throws(() => db.add(dir, { ...input, evidence: text + " extra" }, origin), /evidence exceeds 20 words/);
@@ -62,7 +62,7 @@ test("word limits bound new writes and atomic imports without changing existing 
   db = new MemoryStore(custom.databasePath, custom);
   const longer = db.add(dir, { ...input, text: text + " extra", evidence: "Verified." }, origin).lesson;
   assert.deepEqual(db.get(dir, saved.id), saved, "adding another lesson must not change the existing ID or text");
-  assert.ok(memoryContext(db.recall(dir)).text.includes(`\n- ${text.replace(/\s+/gu, " ")} #${saved.id}`));
+  assert.ok(memoryContext(db.recall(dir)).text.includes(`\n- [P5] ${text.replace(/\s+/gu, " ")} #${saved.id}`));
   assert.throws(() => db.add(dir, { ...input, evidence: "Two words" }, origin), /evidence exceeds 1 words/);
   db.close();
   db = new MemoryStore(defaults.databasePath);
@@ -167,7 +167,7 @@ test("recall and paged search stay byte-bounded without deleting excess lessons"
   } while (offset !== null);
   assert.equal(ids.size, 31);
   assert.equal(db.list("/project").total, 31);
-  assert.throws(() => runMemory(db, "/project", { action: "add", text: "Missing evidence", basis: "validated_fix" }, origin), /evidence/);
+  assert.throws(() => runMemory(db, "/project", { action: "add", priority: 5, text: "Missing evidence", basis: "validated_fix" }, origin), /evidence/);
   assert.equal(db.add("/project", { text: "A later write succeeds.", evidence: "Verified.", basis: "user_request" }, origin).created, true,
     "breaking recall at the byte budget must release its cursor before later writes");
 });

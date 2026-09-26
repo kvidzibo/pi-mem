@@ -11,18 +11,19 @@ import { legacyContext, legacyFiles } from "./legacy.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { projectScope } from "./project.ts";
-import { MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
+import { checkedPriority, DEFAULT_PRIORITY, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "add", "supersede", "archive", "archived", "import", "export", "reload", "help"];
+const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "archive", "archived", "import", "export", "reload", "help"];
 const HELP = [
   "/pi-mem — open the project memory menu (text status without UI)",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
-  "/pi-mem add <lesson> | supersede <id> <lesson> | archive <id>",
+  "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
+  "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
   "/pi-mem import [path] — draft if needed, review Before/After preview, approve import; source always kept unchanged",
   "/pi-mem export <new-path> — active lesson text, no overwrite",
   "/pi-mem reload — reconnect and reread database configuration",
@@ -292,7 +293,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
-      "Records are retained: no in-place edits, restore, or delete. Exact active duplicates are not added. " +
+      "add requires priority, an integer from 1 (highest) to 10 (lowest). " +
+      "Score future usefulness by consequence of ignoring the lesson, likelihood of recurrence, and breadth of applicability. " +
+      "1–2: serious damage or corruption; 3–4: recurring failures or expensive debugging; " +
+      "5–6: useful recurring knowledge; 7–8: narrow quirks; 9–10: marginal future value. " +
+      "supersede inherits priority unless supplied; priority 0 is user-reserved and preserved when superseding. " +
+      "Lesson content is retained: supersede rather than edit it; no restore or delete. Exact active duplicates are not added. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
     promptSnippet: "Add, supersede, or archive project lessons",
     parameters: Type.Object({
@@ -302,13 +308,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
+      priority: Type.Optional(Type.Integer({ minimum: 1, maximum: 10,
+        description: "Required for add; optional for supersede. 1 = highest priority, 10 = lowest. Zero is user-only." })),
     }),
     prepareArguments(args) {
-      // Parse before Pi's schema coercion can turn true into 1 or accept other non-ID values.
-      if (args && typeof args === "object" && "id" in args && args.id != null) {
-        return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
+      // Reject coercible values before Pi's schema validation (e.g. true becoming 1).
+      if (args && typeof args === "object") {
+        if ("priority" in args) checkedPriority(args.priority, 1);
+        if ("id" in args && args.id != null) return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
       }
-      return args as MemoryRequest; // The normal schema validation still follows this guard.
+      return args as MemoryRequest;
     },
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
@@ -361,17 +370,29 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(boundedPage(store.list(scope, { query: rest }), 0), ctx);
         } else if (command === "get") {
           show(store.get(scope, parseLessonId(rest)), ctx);
-        } else {
-          let request: MemoryRequest;
+        } else if (command === "priority") {
+          const [id, value] = firstWord(rest);
+          if (!/^(?:[0-9]|10)$/.test(value)) throw new Error("Usage: /pi-mem priority <id> <0–10>");
+          const lesson = store.setPriority(scope, parseLessonId(id), Number(value), source);
+          show({ id: lesson.id, priority: lesson.priority, status: "priority updated", scope }, ctx);
+        } else if (command === "add" || command === "supersede") {
+          const [id, body] = command === "supersede" ? firstWord(rest) : ["", rest];
+          const { text, priority } = commandLesson(body);
+          const input = { text, priority: command === "add" ? priority ?? DEFAULT_PRIORITY : priority,
+            basis: "user_request" as const, evidence: "User-requested." };
           if (command === "add") {
-            request = { action: "add", text: rest, basis: "user_request", evidence: "User-requested." };
-          } else if (command === "supersede" || command === "archive") {
-            const [id, text] = firstWord(rest);
-            request = { action: command, id: parseLessonId(id), text, basis: "user_request", evidence: "User-requested." };
+            const result = store.add(scope, input, source);
+            show(recordWrite({ id: result.lesson.id, priority: result.lesson.priority,
+              status: result.created ? "saved" : "already exists", scope }, ctx), ctx);
           } else {
-            throw new Error(HELP);
+            const result = store.supersede(scope, parseLessonId(id), input, source);
+            show(recordWrite({ id: result.id, priority: result.priority, supersedes_id: result.supersedes_id,
+              status: "superseded", scope }, ctx), ctx);
           }
-          show(recordWrite(runMemory(store, scope, request, source), ctx), ctx);
+        } else if (command === "archive") {
+          show(recordWrite(runMemory(store, scope, { action: "archive", id: parseLessonId(rest) }, source), ctx), ctx);
+        } else {
+          throw new Error(HELP);
         }
         try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       } catch (error) {
@@ -381,6 +402,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
     },
   });
+}
+
+function commandLesson(value: string): { text: string; priority?: number } {
+  const [flag, rest] = firstWord(value);
+  if (flag !== "--priority") return { text: value };
+  const [score, text] = firstWord(rest);
+  if (!/^(?:[0-9]|10)$/.test(score)) throw new Error("--priority requires an integer from 0 to 10");
+  return { text, priority: checkedPriority(Number(score)) };
 }
 
 function firstWord(value: string): [string, string] {
