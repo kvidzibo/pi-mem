@@ -508,7 +508,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   mkdirSync(project);
   const notices: string[] = [];
   const messages: Array<{ content: string }> = [];
-  type Step = { title: string; choice?: string; text?: string; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
+  type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
   let extension: Awaited<ReturnType<typeof load>>;
@@ -539,6 +539,17 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
         try {
           const screen = () => stripVTControlCharacters(component.render(220).join("\n"));
           assert.ok(screen().startsWith(step.title), `${step.title}: ${screen()}`);
+          if (step.search !== undefined) {
+            assert.match(screen(), /Type to search/);
+            if (step.beforeSearch) assert.match(screen(), step.beforeSearch);
+            component.focused = true;
+            for (const char of step.search) component.handleInput(char);
+            assert.match(screen(), /1–1 of 1/);
+            component.handleInput("!");
+            assert.match(screen(), /No lessons found/);
+            component.handleInput("\x7f");
+            assert.match(screen(), /1–1 of 1/);
+          }
           if (step.match) assert.match(screen(), step.match);
           if (step.text !== undefined) {
             component.focused = true;
@@ -590,8 +601,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
       { title: "Browse / search", choice: "Next page", match: /1–1000 of 1002/ },
-      { title: "Browse / search", choice: "Search…", match: /1001–1002 of 1002[\s\S]*\[omitted\]/ },
-      { title: "Browse / search", choice: "Seed 0.", match: /Search: Seed 0\./ },
+      { title: "Browse / search", search: "Seed 0.", beforeSearch: /1001–1002 of 1002[\s\S]*\[omitted\]/, choice: "Seed 0.", match: /Search: Seed 0\.[\s\S]*\[omitted\]/ },
       { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
       { title: "Replace lesson", text: "Seed 0. Corrected.", match: /2\/5 words/ },
       { title: "Review replacement", choice: "Cancel", match: /BEFORE\nSeed 0\.\n\nAFTER\nSeed 0\. Corrected\./ },
@@ -618,11 +628,15 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Lesson priority", choice: "5" },
       { title: "Lesson details", choice: "Back", match: /Priority: 5/ },
       { title: "Browse / search", choice: "Back" },
+      { title: "Memory ·", choice: "Archived lessons" },
+      { title: "Archived lessons", search: "Corrected", choice: "Seed 0. Corrected." },
+      { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
+      { title: "Archived lessons", choice: "Clear search", match: /Search: Corrected/ },
+      { title: "Archived lessons", choice: "Back", match: /1–2 of 2/ },
       { title: "Memory ·", choice: "Status & limits" },
       { title: "Status & limits", choice: "Back", match: /Project scope:[\s\S]*Archived: 2[\s\S]*5 words[\s\S]*1 lessons or 32 KiB/ },
       { title: "Memory ·" },
     );
-    inputs.push("Seed 0.");
     await run();
     assert.ok(notices.some((text) => /text exceeds 5 words/.test(text)));
     assert.equal(observer.get(project, original.id).archived, true);
@@ -671,11 +685,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     // Display normalization must not turn unchanged whitespace into literal escapes or new wording.
     const whitespace = "Keep\toriginal\r\nwhitespace.";
     observer.add(project, { text: whitespace, evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null });
-    steps.push({ title: "Memory ·", choice: "Browse / search lessons" }, { title: "Browse / search", choice: "Search…" },
-      { title: "Browse / search", choice: "Keep original whitespace." }, { title: "Lesson details", choice: "Replace…" },
+    steps.push({ title: "Memory ·", choice: "Browse / search lessons" },
+      { title: "Browse / search", search: "Keep", choice: "Keep original whitespace." }, { title: "Lesson details", choice: "Replace…" },
       { title: "Replace lesson", submit: true, match: /3\/5 words/ }, { title: "Review replacement", choice: "Save" },
       { title: "Browse / search", choice: "Back" }, { title: "Memory ·" });
-    inputs.push("Keep");
     await run();
     assert.equal(observer.list(project, { query: "Keep" }).lessons[0].text, whitespace);
     assert.equal(notices.some((text) => /characters are escaped/.test(text)), false, "ordinary whitespace must not raise control-character warnings");

@@ -150,23 +150,38 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     let selected: string | undefined;
     while (true) {
       const { store, scope, limits } = access.current();
-      let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
-      if (!page.lessons.length && offset > 0) {
-        offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
-        page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
-      }
-      const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
-      const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
-        `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
-      const body = [
-        query ? `Search: ${query}` : "All lessons · priority first, then newest",
-        page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
-        archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
-      ].join("\n");
-      const action = await choose(archived ? "Archived lessons" : "Browse / search lessons", body, [
-        ...rows, item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : []),
-        ...(offset ? [item("previous", "Previous page")] : []), ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
-      ], selected);
+      let nextOffset: number | null = null;
+      const listing = () => {
+        let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
+        if (!page.lessons.length && offset > 0) {
+          offset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+          page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
+        }
+        nextOffset = page.nextOffset;
+        const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
+        const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
+          `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
+        const body = [
+          query ? `Search: ${query}` : "All lessons · priority first, then newest",
+          page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
+          archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
+        ].join("\n");
+        return { body, items: [
+          ...rows, ...(ctx.mode !== "tui" ? [item("search", "Search…")] : []), ...(query ? [item("clear", "Clear search")] : []),
+          ...(offset ? [item("previous", "Previous page")] : []), ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
+        ] };
+      };
+      const initial = listing();
+      access.check();
+      const action = await menuChoice(ctx, archived ? "Archived lessons" : "Browse / search lessons", initial.body, initial.items,
+        signal, selected, { query, update: (text) => {
+          access.check();
+          query = text.trim();
+          offset = 0;
+          selected = undefined;
+          return listing();
+        } });
+      access.check();
       if (!action || action === "back") return;
       if (action === "search") {
         const text = await ctx.ui.input("Search lesson text / evidence (literal substring, max 200 characters; blank clears)", query, { signal });
@@ -177,7 +192,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         catch (error) { reportError(error); continue; }
         query = nextQuery; offset = 0; selected = undefined;
       } else if (action === "clear") { query = ""; offset = 0; selected = undefined; }
-      else if (action === "next") { offset = page.nextOffset!; selected = undefined; }
+      else if (action === "next") { offset = nextOffset!; selected = undefined; }
       else if (action === "previous") { offset = Math.max(0, offset - PAGE_SIZE); selected = undefined; }
       else {
         selected = action;
