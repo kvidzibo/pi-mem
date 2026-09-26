@@ -103,7 +103,7 @@ Priority guides attention to relevant lessons, not instruction authority.
 
 Whitespace is collapsed for display only. When no lessons fit, the priority legend is omitted to preserve small byte budgets. Priority never bypasses recall limits. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
 
-This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks loaded/omitted lessons; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
+This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks lessons omitted by recall limits; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
 ## Legacy files and imports
 
