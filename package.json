@@ -9,9 +9,9 @@
   "bugs": { "url": "https://github.com/kvidzibo/pi-mem/issues" },
   "type": "module",
   "keywords": ["pi-package"],
-  "files": ["src", "README.md", "LICENSE"],
+  "files": ["index.ts", "src", "README.md", "LICENSE"],
   "engines": { "node": ">=22.19.0" },
-  "pi": { "extensions": ["./src/index.ts"] },
+  "pi": { "extensions": ["./index.ts"] },
   "scripts": {
     "test": "npm run check && npm run test:unit && npm run test:load",
     "check": "tsc --noEmit",
