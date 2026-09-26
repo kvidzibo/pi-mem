@@ -30,7 +30,7 @@ There are no agent read/search/history actions. An archived record cannot be sup
 
 Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
-- Browse/search active or archived lessons; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
+- Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
 - Add lessons, review replacements, or confirm archiving. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
 - **Move memory…** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Import/export Markdown, inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
@@ -60,7 +60,7 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | `/pi-mem reload` | Reread configuration and reconnect; also retries initialization failures |
 | `/pi-mem help` | Show command help |
 
-IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. UUIDs are discarded during migration and are no longer valid references. List/archived pages return `nextOffset`; pages are capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
+IDs are stable positive integers, unique across the database and never reused—not list positions. Use the number from a lesson's `#id` suffix; commands also accept `#42` instead of `42`. UUIDs are discarded during migration and are no longer valid references. Direct list/archived command pages return `nextOffset`; command output is capped at 30 records and 16 KiB. Search returns one bounded page, with SQLite's ASCII case-insensitive matching.
 
 `--no-session` still recalls memory. Agent writes in ephemeral sessions require `basis: "user_request"`; explicit user commands remain available.
 

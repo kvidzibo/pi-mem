@@ -251,8 +251,8 @@ export class MemoryStore {
     this.checkScope(scope);
     const { state = "active", offset = 0, limit = 30 } = options;
     if (!["active", "archived", "all"].includes(state)) throw new Error("Invalid lesson state");
-    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 30) {
-      throw new Error("offset must be nonnegative; limit must be between 1 and 30");
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new Error("offset must be nonnegative; limit must be between 1 and 1000");
     }
     const query = options.query === undefined ? "" : checkedText(options.query, "query", 200);
     const where = `scope = ? AND (? = 'all' OR archived = ?) AND instr(lower(text || char(10) || evidence), lower(?)) > 0`;

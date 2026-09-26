@@ -35,7 +35,7 @@ interface MenuAccess {
 const item = (value: string, label: string): SelectItem => ({ value, label });
 const BACK = item("back", "Back");
 const CANCEL = item("cancel", "Cancel");
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 1000;
 const errorText = (error: unknown) => visible(clipped(error instanceof Error ? error.message : String(error), 1000));
 
 /** Human-only navigation: no session messages or direct model calls. */

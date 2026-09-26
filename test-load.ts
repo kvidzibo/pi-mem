@@ -539,7 +539,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           component.invalidate();
           if (step.choice) {
             for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && line.includes(step.choice!)); count++) {
-              assert.ok(count < 40, `choice ${step.choice} not found: ${screen()}`);
+              assert.ok(count < 1020, `choice ${step.choice} not found: ${screen()}`);
               component.handleInput("\x1b[B");
             }
           }
@@ -559,8 +559,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     extension.runtime.sendMessage = (message: { content: string }) => messages.push(message);
     await event("session_start");
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
-    observer.addMany(project, Array.from({ length: 12 }, (_, i) => ({ text: `Seed ${i}.`, evidence: "Verified.", basis: "user_request" as const })),
-      { harness: "test", session: "seed-session" });
+    for (let offset = 0; offset < 1002; offset += 500) {
+      observer.addMany(project, Array.from({ length: Math.min(500, 1002 - offset) }, (_, i) => ({ text: `Seed ${offset + i}.`, evidence: "Verified.", basis: "user_request" as const })),
+        { harness: "test", session: "seed-session" });
+    }
     const original = observer.list(project, { query: "Seed 0." }).lessons[0];
     const command = extension.commands.get("pi-mem");
     const run = async () => {
@@ -569,9 +571,9 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       assert.equal(inputs.length, 0);
     };
     steps.push(
-      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
-      { title: "Browse / search", choice: "Next page", match: /1–10 of 12/ },
-      { title: "Browse / search", choice: "Search…", match: /11–12 of 12[\s\S]*\[omitted\]/ },
+      { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
+      { title: "Browse / search", choice: "Next page", match: /1–1000 of 1002/ },
+      { title: "Browse / search", choice: "Search…", match: /1001–1002 of 1002[\s\S]*\[omitted\]/ },
       { title: "Browse / search", choice: "Seed 0.", match: /Search: Seed 0\./ },
       { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
       { title: "Replace lesson", text: "Seed 0. Corrected.", match: /2\/5 words/ },
@@ -629,7 +631,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     writeFileSync(config, JSON.stringify({ maxLessonWords: 5, maxRecallLessons: 100, maxRecallBytes: 64 }));
     await command.handler("reload", ctx);
     steps.push(
-      { title: "Memory ·", choice: "Browse / search lessons", match: /12 active · 1 loaded/ },
+      { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
       { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
         match: /\[loaded\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
       { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits/ },
