@@ -37,7 +37,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   const ctx = {
     cwd: join(directory, "project"), hasUI: true, mode: "rpc",
     sessionManager: { getSessionId: () => "load-session", getSessionFile: (): string | undefined => "/temporary/session.jsonl",
-      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries(),
+      getBranch: () => [{ type: "message", message: { role: "assistant", provider: "test-provider", model: "issuing-model",
+        content: [{ type: "toolCall", id: "call", name: "memory", arguments: {} }] } }] },
     ui: {
       notify: (text: string) => notices.push(text), setStatus: (_key: string, text?: string) => statuses.push(text),
       editor: async (_title: string, prefill: string) => prefill,
@@ -69,9 +71,9 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const emptyRecall = await event("context", { messages: [] });
     expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
-    assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
+    assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
@@ -79,6 +81,17 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       /Maximum 20 words per lesson and 20 words for evidence/);
     const saved = JSON.parse((await execute(input)).content[0].text);
     assert.equal(saved.status, "saved");
+    const creation = inspection.history(ctx.cwd, saved.id).events[0];
+    assert.equal(creation.actor, "model");
+    assert.equal(creation.provider, "test-provider");
+    assert.equal(creation.model, "issuing-model");
+    const reprioritized = JSON.parse((await execute({ action: "set_priority", id: saved.id, priority: 3,
+      reason: "Frequently recurring failure." })).content[0].text);
+    assert.equal(reprioritized.priority, 3);
+    const priorityEvent = inspection.history(ctx.cwd, saved.id).events.find((event) => event.reason === "Frequently recurring failure.");
+    assert.equal(priorityEvent?.model, "issuing-model");
+    await execute({ action: "set_priority", id: saved.id, priority: 5 });
+    assert.equal(savedEntries().length, 1, "priority changes must not create saved/archive chat cards");
     for (const id of [true, "00000000-0000-4000-8000-000000000001"]) {
       await assert.rejects(execute({ action: "archive", id }), /id must be a positive safe integer/);
     }
@@ -167,6 +180,8 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await event("session_start", { reason: "resume" });
     expectStatus(1, 1, recall.messages[0].content, 3, 1);
     const command = extension.commands.get("pi-mem");
+    await command.handler(`history ${learned.id}`, ctx);
+    assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.history(ctx.cwd, learned.id, 0, 5));
     await command.handler(`get ${learned.id}`, ctx);
     assert.deepEqual(JSON.parse(notices.at(-1)!), inspection.get(ctx.cwd, learned.id));
     await command.handler(`get #${learned.id}`, ctx);
@@ -263,6 +278,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const extremeReplacement = JSON.parse((await execute({ ...input, action: "supersede", id: extreme.id,
       text: "Corrected extreme lesson.", evidence: "Verified.", basis: "user_request", priority: 10 })).content[0].text);
     assert.equal(extremeReplacement.priority, 0);
+    await assert.rejects(execute({ action: "set_priority", id: extremeReplacement.id, priority: 1, basis: "user_request" }), /user-reserved/);
     await command.handler(`priority ${extremeReplacement.id} 7`, ctx);
     assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
     await command.handler(`priority ${extremeReplacement.id} false`, ctx);
@@ -406,6 +422,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Browse / search", choice: "New menu lesson.", match: /\[P0\]/ },
       { title: "Lesson details", choice: "Change priority…", match: /Priority: 0/ },
       { title: "Lesson priority", choice: "5" },
+      { title: "Lesson details", choice: "History", match: /Priority: 5/ },
+      { title: "History ·", choice: "priority", match: /Retained changes only/ },
+      { title: "Activity ·", choice: "Back", match: /Actor: user[\s\S]*Session: menu-session/ },
+      { title: "History ·", choice: "Back" },
       { title: "Lesson details", choice: "Back", match: /Priority: 5/ },
       { title: "Browse / search", choice: "Back" },
       { title: "Memory ·", choice: "Archived lessons" },

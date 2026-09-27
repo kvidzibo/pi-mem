@@ -95,6 +95,35 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     }
   }
 
+  async function activity(id: number) {
+    let offset = 0;
+    while (true) {
+      const { store, scope } = access.current();
+      const page = store.history(scope, id, offset, 20);
+      const action = await choose(`History · #${id}`, "Retained changes only; browsing and recall are not logged.\nHistorical entries may have unknown attribution or dates.", [
+        ...page.events.map((event) => item(String(event.id),
+          `${event.at === null ? "Unknown date" : new Date(event.at).toISOString()} · ${event.action} · ${event.actor}${event.model ? ` (${event.model})` : ""}`)),
+        ...(offset ? [item("previous", "Previous page")] : []),
+        ...(page.nextOffset !== null ? [item("next", "Next page")] : []), BACK,
+      ]);
+      if (!action || action === "back") return;
+      if (action === "previous") { offset = Math.max(0, offset - 20); continue; }
+      if (action === "next") { offset = page.nextOffset!; continue; }
+      const event = page.events.find((event) => event.id === Number(action));
+      if (!event) continue;
+      const related = event.details.successor_id ?? event.details.predecessor_id;
+      const linkedId = typeof related === "number" && Number.isSafeInteger(related) && related > 0 ? related : undefined;
+      const next = await choose(`Activity · #${id} · ${event.action}`, [
+        `Time: ${event.at === null ? "unknown" : new Date(event.at).toISOString()}`,
+        `Actor: ${event.actor}`, `Provider: ${event.provider ?? "unknown"}`, `Model: ${event.model ?? "unknown"}`,
+        `Harness: ${event.harness}`, `Session: ${event.session ?? "unknown"}`,
+        ...(event.historical ? ["Recovered from existing records; missing history cannot be reconstructed."] : []),
+        ...(event.reason ? [`Reason: ${event.reason}`] : []), "", JSON.stringify(event.details, null, 2),
+      ].join("\n"), [BACK, ...(linkedId ? [item("linked", `View linked lesson #${linkedId}`)] : [])]);
+      if (next === "linked" && linkedId) await details(linkedId);
+    }
+  }
+
   async function details(initialId: number) {
     const history = [initialId];
     while (history.length) {
@@ -110,12 +139,13 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
           "Archived records are read-only except for project moves. No restore or delete."] : []),
       ].join("\n");
-      const action = await choose("Lesson details", body, [BACK, item("move", "Move lesson…"),
+      const action = await choose("Lesson details", body, [BACK, item("history", "History"), item("move", "Move lesson…"),
         ...(!lesson.archived ? [item("replace", "Replace…"), item("priority", "Change priority…"), item("archive", "Archive…")] : []),
         ...(lesson.supersedes_id ? [item("predecessor", "View predecessor")] : []),
       ]);
       if (!action || action === "back") { history.pop(); continue; }
       if (action === "predecessor") { history.push(lesson.supersedes_id!); continue; }
+      if (action === "history") { await activity(lesson.id); continue; }
       if (action === "move") { if (await moveLesson(lesson)) return; }
       if (action === "replace") { if (await saveLesson(lesson)) return; }
       if (action === "priority") {
@@ -132,7 +162,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
           [CANCEL, item("archive", "Archive")]);
         if (confirmed !== "archive") continue;
         const current = access.current();
-        const result = current.store.archive(current.scope, lesson.id);
+        const result = current.store.archive(current.scope, lesson.id, access.origin);
         if (result.changed) access.archived(result.lesson.id);
         ctx.ui.notify("Lesson archived; excluded from future recall. Record retained.", "info");
         access.refresh();
@@ -210,7 +240,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     if (confirmed !== "move") return false;
     if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
     const current = access.current();
-    const moved = current.store.moveLesson(current.scope, lesson.id, to);
+    const moved = current.store.moveLesson(current.scope, lesson.id, to, access.origin);
     access.refresh();
     ctx.ui.notify(`Moved lesson #${lesson.id} and linked history (${moved} records) to ${JSON.stringify(to)}.`, "info");
     return true;
@@ -235,7 +265,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       [CANCEL, item("move", "Move memory")]);
     if (confirmed !== "move") return;
     if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
-    const moved = access.current().store.moveScope(from, to);
+    const moved = access.current().store.moveScope(from, to, access.origin);
     access.refresh();
     ctx.ui.notify(`Moved ${moved} lessons to ${JSON.stringify(to)}.`, "info");
   }

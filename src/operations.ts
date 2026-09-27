@@ -1,17 +1,19 @@
 import { checkedPriority, MemoryStore, type Basis, type Origin } from "./store.ts";
 
-export const ACTIONS = ["add", "supersede", "archive"] as const;
+export const ACTIONS = ["add", "supersede", "archive", "set_priority"] as const;
 export interface MemoryRequest {
   action: typeof ACTIONS[number];
   id?: number;
   text?: string;
   evidence?: string;
   priority?: number;
+  reason?: string;
   basis?: Exclude<Basis, "import">;
 }
 
 /** Agent-facing writes only. Reads stay internal to automatic recall and explicit user commands. */
 export function runMemory(store: MemoryStore, scope: string, request: MemoryRequest, origin: Origin) {
+  origin = { ...origin, reason: request.reason };
   switch (request.action) {
     case "add":
     case "supersede": {
@@ -27,8 +29,15 @@ export function runMemory(store: MemoryStore, scope: string, request: MemoryRequ
       const result = store.supersede(scope, parseLessonId(request.id), input, origin, true);
       return { id: result.id, priority: result.priority, supersedes_id: result.supersedes_id, status: "superseded", scope };
     }
+    case "set_priority": {
+      checkedPriority(request.priority, 1);
+      const id = parseLessonId(request.id);
+      if (store.get(scope, id).priority === 0) throw new Error("Priority 0 is user-reserved; models cannot reprioritize it");
+      const result = store.setPriority(scope, id, request.priority!, origin);
+      return { id: result.id, priority: result.priority, status: "priority updated", scope };
+    }
     case "archive": {
-      const result = store.archive(scope, parseLessonId(request.id));
+      const result = store.archive(scope, parseLessonId(request.id), origin);
       return { id: result.lesson.id, archived: result.lesson.archived, changed: result.changed, scope };
     }
     default:
