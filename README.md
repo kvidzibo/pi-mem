@@ -2,7 +2,7 @@
 
 [npm](https://www.npmjs.com/package/@kvidzibo/pi-mem) · [Pi package directory](https://pi.dev/packages)
 
-SQLite-backed project memory for Pi. Active lessons are recalled automatically; the agent can only **add**, **supersede**, or **archive** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
+SQLite-backed project memory for Pi. Active lessons are recalled automatically; the agent can **add**, **supersede**, **archive**, or **reprioritize** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
 
 No transcript harvesting, embeddings, or background model calls. Memory is stored and recalled only through SQLite; Markdown files are not read or written.
 
@@ -25,6 +25,9 @@ The agent's `memory` tool exposes only:
 - **`add`** — save `text`, `evidence`, `basis` (`validated_learning`, `validated_fix`, or `user_request`), and integer `priority` **1–10** (1 highest).
 - **`supersede`** — supply an active lesson's `id` and the new lesson fields. Priority is inherited unless supplied; model replacements always preserve a user's priority **0**. Creating the linked replacement and archiving its predecessor succeed together or neither does.
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
+- **`set_priority`** — supply an active lesson's `id` and `priority` **1–10**. Content and ID stay unchanged; models cannot reprioritize priority-0 lessons.
+
+Every tool action accepts an optional `reason` (up to 600 characters), retained in its activity log.
 
 Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Unscored migrated records default to **5**; migration makes no model calls.
 
@@ -33,7 +36,8 @@ There are no agent read/search/history actions. An archived record cannot be sup
 Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
-- Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Priority-only changes are recorded in a retained SQLite audit table. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Every change is recorded atomically in an append-only SQLite activity log. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
+- **History** in lesson details lists changes with timestamps, actor, provider/model, harness/session, reason when supplied, and relevant before/after values or replacement links. History follows project moves and stays out of automatic recall. Browsing, recall, failures, and no-ops are not logged. Model attribution comes from the assistant message issuing the tool call; missing attribution is marked unknown.
 - **Move lesson…** in lesson details moves only that lesson and its linked replacement history (including any successor), preserving IDs and metadata. Unrelated lessons stay put. Nonempty destinations are allowed; duplicate active text is refused atomically. Available for active and archived lessons; the destination must be an existing directory and resolves to its canonical Git root or cwd.
 - **Move memory** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical Git root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
@@ -60,6 +64,7 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | `/pi-mem archived [offset]` | Page through archived records |
 | `/pi-mem search <text>` | Search active text/evidence by literal substring |
 | `/pi-mem get <id>` | Inspect a retained record and its predecessor link |
+| `/pi-mem history <id> [offset]` | Inspect activity, five entries per page with `nextOffset` |
 | `/pi-mem reload` | Reread configuration and reconnect; also retries initialization failures |
 | `/pi-mem help` | Show command help |
 
@@ -109,7 +114,7 @@ This is one replaceable, UI-hidden user-role message before the conversation, no
 
 - Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons and project paths go to the selected model, including hosted providers. Print/JSON command reports can persist in session history and later model context.
 - Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
-- **Back up before upgrading.** Schema v1–v5 databases upgrade atomically to **v6** on open, initially assigning priority **5**. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing v4/v5 integer IDs remain unchanged. Existing lessons can then be explicitly reviewed and reprioritized; no automatic model scoring runs on startup. Previously overwritten content cannot be recovered. Older releases cannot open v6: keep v6-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
+- **Back up before upgrading.** Schema v1–v6 databases upgrade atomically to **v7** on open. Pre-v6 records initially receive priority **5**; v6 priorities and priority-change history are preserved. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing integer IDs remain unchanged. Historical activity is reconstructed only from retained facts; missing actors, models, dates, and earlier changes remain unknown. Existing lessons can then be explicitly reviewed and reprioritized; no automatic model scoring runs on startup. Previously overwritten content cannot be recovered. Older releases cannot open v7: keep v7-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation
 

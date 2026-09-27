@@ -9,7 +9,18 @@ export const MAX_EVIDENCE = 600;
 // Keep historical import provenance readable without changing the retained database schema.
 export type Basis = "validated_learning" | "validated_fix" | "user_request" | "import";
 export type State = "active" | "archived" | "all";
-export interface Origin { harness: string; session: string | null }
+export interface Origin {
+  harness: string; session: string | null;
+  actor?: "user" | "model" | "unknown";
+  provider?: string | null; model?: string | null; reason?: string;
+}
+export interface Activity {
+  id: number; lesson_id: number; action: string; at: number | null;
+  actor: "user" | "model" | "unknown"; provider: string | null; model: string | null;
+  harness: string; session: string | null; reason: string | null;
+  details: Record<string, unknown>; historical: boolean;
+}
+const UNKNOWN_ORIGIN: Origin = { harness: "unknown", session: null, actor: "unknown" };
 export interface Lesson {
   id: number;
   scope: string;
@@ -32,7 +43,7 @@ export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 export const DEFAULT_PRIORITY = 5;
 
 export function checkedPriority(value: unknown, minimum = 0): number {
@@ -113,12 +124,18 @@ export class MemoryStore {
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
     const empty = application === 0 && version === 0 &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length === 0;
+    if (application === APPLICATION_ID && version === 6) {
+      this.initializeActivityHistory();
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      return;
+    }
     if (application === APPLICATION_ID && version === 5) {
       this.db.exec(`ALTER TABLE lessons ADD COLUMN priority INTEGER NOT NULL DEFAULT ${DEFAULT_PRIORITY}
         CHECK(typeof(priority) = 'integer' AND priority BETWEEN 0 AND 10);
         DROP INDEX lessons_recall;
         CREATE INDEX lessons_recall ON lessons(scope, archived, priority, created_at DESC, id);`);
       this.initializePriorityHistory();
+      this.initializeActivityHistory();
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       return;
     }
@@ -207,6 +224,7 @@ export class MemoryStore {
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
     this.initializePriorityHistory();
+    this.initializeActivityHistory();
     if (this.db.prepare("PRAGMA foreign_key_check").all().length) throw new Error("Invalid migrated lesson links");
   }
 
@@ -233,19 +251,84 @@ export class MemoryStore {
     `);
   }
 
-  /** Human-only metadata change; lesson identity and content stay untouched. */
+  private initializeActivityHistory(): void {
+    this.db.exec(`
+      CREATE TABLE activity (
+        id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id > 0),
+        lesson_id INTEGER NOT NULL REFERENCES lessons(id),
+        action TEXT NOT NULL CHECK(action IN ('create', 'import', 'supersede', 'archive', 'set_priority', 'move')),
+        at INTEGER,
+        actor TEXT NOT NULL CHECK(actor IN ('user', 'model', 'unknown')),
+        provider TEXT, model TEXT, harness TEXT NOT NULL, session TEXT, reason TEXT,
+        details TEXT NOT NULL CHECK(json_valid(details)),
+        historical INTEGER NOT NULL CHECK(historical IN (0, 1))
+      ) WITHOUT ROWID;
+      CREATE INDEX activity_lesson ON activity(lesson_id, at DESC, id DESC);
+      CREATE TRIGGER activity_no_update BEFORE UPDATE ON activity
+        BEGIN SELECT RAISE(ABORT, 'Activity is immutable'); END;
+      CREATE TRIGGER activity_no_delete BEFORE DELETE ON activity
+        BEGIN SELECT RAISE(ABORT, 'Activity cannot be deleted'); END;
+      CREATE TRIGGER activity_no_replace BEFORE INSERT ON activity
+        WHEN EXISTS (SELECT 1 FROM activity WHERE id = NEW.id)
+        BEGIN SELECT RAISE(ABORT, 'Activity cannot be replaced'); END;
+    `);
+    // Only retained facts: current project/priority are not evidence of their creation-time values.
+    for (const row of this.db.prepare("SELECT * FROM lessons ORDER BY created_at, id").all()) {
+      const current = lesson(row);
+      const source = { harness: current.source_harness, session: current.source_session };
+      this.log(current.id, current.basis === "import" ? "import" : "create", source,
+        { predecessor_id: current.supersedes_id, retained_revision: current.revision }, current.created_at, true);
+      if (current.archived) {
+        const successor = this.db.prepare("SELECT id, source_harness, source_session FROM lessons WHERE supersedes_id = ?").get(current.id);
+        const archiver = successor ? { harness: String(successor.source_harness), session: successor.source_session as string | null } : UNKNOWN_ORIGIN;
+        this.log(current.id, successor ? "supersede" : "archive", archiver,
+          { before: "active", after: "archived", ...(successor ? { successor_id: Number(successor.id) } : {}) },
+          current.archived_at, true);
+      }
+    }
+    for (const row of this.db.prepare("SELECT * FROM priority_changes ORDER BY changed_at, id").all()) {
+      this.log(Number(row.lesson_id), "set_priority", { harness: String(row.source_harness), session: row.source_session as string | null },
+        { before: Number(row.old_priority), after: Number(row.new_priority) }, Number(row.changed_at), true);
+    }
+  }
+
+  private log(id: number, action: string, origin: Origin, details: Record<string, unknown>, at: number | null = Date.now(), historical = false): void {
+    this.checkOrigin(origin);
+    this.db.prepare(`INSERT INTO activity
+      (id, lesson_id, action, at, actor, provider, model, harness, session, reason, details, historical)
+      VALUES ((SELECT coalesce(max(id), 0) + 1 FROM activity), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, action, at, origin.actor ?? "unknown", origin.provider ?? null, origin.model ?? null,
+        origin.harness, origin.session, origin.reason ?? null, JSON.stringify(details), historical ? 1 : 0);
+  }
+
+  history(scope: string, id: number, offset = 0, limit = 50): { events: Activity[]; nextOffset: number | null } {
+    const current = this.get(scope, id);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new Error("offset must be nonnegative; limit must be between 1 and 1000");
+    }
+    // Unknown legacy archive dates still follow creation; never fabricate a stored/displayed timestamp.
+    const rows = this.db.prepare("SELECT * FROM activity WHERE lesson_id = ? ORDER BY coalesce(at, ?) DESC, id DESC LIMIT ? OFFSET ?")
+      .all(id, current.created_at, limit + 1, offset);
+    const events = rows.slice(0, limit).map((row) => ({ ...row,
+      details: JSON.parse(String(row.details)), historical: row.historical === 1 } as Activity));
+    return { events, nextOffset: rows.length > limit ? offset + limit : null };
+  }
+
+  /** Metadata change; lesson identity and content stay untouched. */
   setPriority(scope: string, id: number, priority: number, origin: Origin): Lesson {
-    checkedPriority(priority);
+    checkedPriority(priority, origin.actor === "model" ? 1 : 0);
     this.checkOrigin(origin);
     return this.transaction(() => {
       const current = this.get(scope, id);
       if (current.archived) throw new Error("Archived lesson priority is read-only");
+      if (origin.actor === "model" && current.priority === 0) throw new Error("Priority 0 is user-reserved; models cannot reprioritize it");
       if (current.priority === priority) return current;
       this.db.prepare(`INSERT INTO priority_changes
         (id, lesson_id, old_priority, new_priority, changed_at, source_harness, source_session)
         VALUES ((SELECT coalesce(max(id), 0) + 1 FROM priority_changes), ?, ?, ?, ?, ?, ?)`)
         .run(id, current.priority, priority, Date.now(), origin.harness, origin.session);
       this.db.prepare("UPDATE lessons SET priority = ? WHERE scope = ? AND id = ?").run(priority, scope, id);
+      this.log(id, "set_priority", origin, { before: current.priority, after: priority });
       return this.get(scope, id);
     });
   }
@@ -276,13 +359,17 @@ export class MemoryStore {
   private checkOrigin(origin: Origin): void {
     checkedText(origin.harness, "source harness", 80);
     if (origin.session !== null) checkedText(origin.session, "source session", 160);
+    if (origin.actor !== undefined && !["user", "model", "unknown"].includes(origin.actor)) throw new Error("Invalid actor");
+    if (origin.provider != null) checkedText(origin.provider, "provider", 200);
+    if (origin.model != null) checkedText(origin.model, "model", 300);
+    if (origin.reason !== undefined) checkedText(origin.reason, "reason", 600);
   }
 
   listScopes(): string[] {
     return this.db.prepare("SELECT DISTINCT scope FROM lessons ORDER BY scope").all().map((row) => String(row.scope));
   }
 
-  moveScope(from: string, to: string): number {
+  moveScope(from: string, to: string, origin: Origin = UNKNOWN_ORIGIN): number {
     this.checkScope(from);
     this.checkScope(to);
     if (from === to) throw new Error("Source and destination scopes must differ");
@@ -293,7 +380,9 @@ export class MemoryStore {
       if (this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? LIMIT 1").get(to)) {
         throw new Error("Destination scope is occupied");
       }
-      const count = Number(this.db.prepare("SELECT count(*) AS n FROM lessons WHERE scope = ?").get(from)!.n);
+      const rows = this.db.prepare("SELECT id FROM lessons WHERE scope = ?").all(from);
+      for (const row of rows) this.log(Number(row.id), "move", origin, { before: from, after: to });
+      const count = rows.length;
       this.db.exec("DROP TRIGGER lessons_immutable");
       this.db.prepare("UPDATE lessons SET scope = ? WHERE scope = ?").run(to, from);
       this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
@@ -301,7 +390,7 @@ export class MemoryStore {
     });
   }
 
-  moveLesson(from: string, id: number, to: string): number {
+  moveLesson(from: string, id: number, to: string, origin: Origin = UNKNOWN_ORIGIN): number {
     this.checkScope(from);
     this.checkScope(to);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
@@ -322,6 +411,8 @@ export class MemoryStore {
           ON d.scope = ? AND d.archived = 0 AND l.archived = 0 AND d.text_key = l.text_key
         LIMIT 1`).get(from, id, from, to);
       if (duplicate) throw new Error("Duplicate active text in destination project");
+      const members = this.db.prepare(`${chain} SELECT id FROM chain`).all(from, id, from);
+      for (const row of members) this.log(Number(row.id), "move", origin, { before: from, after: to });
       this.db.exec("DROP TRIGGER lessons_immutable");
       const result = this.db.prepare(`${chain}
         UPDATE lessons SET scope = ? WHERE scope = ? AND id IN (SELECT id FROM chain)`)
@@ -412,17 +503,21 @@ export class MemoryStore {
       if (duplicate) throw new Error(`Duplicate active lesson already exists: ${duplicate.id}`);
       const now = Math.max(Date.now(), current.created_at + 1, current.updated_at);
       this.retire(scope, current.id, now);
-      return this.insert(scope, { ...checked,
-        priority: preserveExtreme && current.priority === 0 ? 0 : checked.priority ?? current.priority,
+      const successor = this.insert(scope, { ...checked,
+        priority: (preserveExtreme || origin.actor === "model") && current.priority === 0 ? 0 : checked.priority ?? current.priority,
       }, origin, now, current.id);
+      this.log(current.id, "supersede", origin, { before: "active", after: "archived", successor_id: successor.id }, now);
+      return successor;
     });
   }
 
-  archive(scope: string, id: number): { lesson: Lesson; changed: boolean } {
+  archive(scope: string, id: number, origin: Origin = UNKNOWN_ORIGIN): { lesson: Lesson; changed: boolean } {
     return this.transaction(() => {
       const current = this.get(scope, id);
       if (current.archived) return { lesson: current, changed: false };
-      this.retire(scope, current.id, Math.max(Date.now(), current.created_at, current.updated_at));
+      const now = Math.max(Date.now(), current.created_at, current.updated_at);
+      this.retire(scope, current.id, now);
+      this.log(current.id, "archive", origin, { before: "active", after: "archived" }, now);
       return { lesson: this.get(scope, current.id), changed: true };
     });
   }
@@ -441,6 +536,8 @@ export class MemoryStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, scope, input.text, textKey(input.text), input.evidence, input.basis, origin.harness, origin.session, now, now, supersedesId, input.priority ?? DEFAULT_PRIORITY,
     );
+    this.log(id, input.basis === "import" ? "import" : "create", origin,
+      { scope, priority: input.priority ?? DEFAULT_PRIORITY, predecessor_id: supersedesId }, now);
     return this.get(scope, id);
   }
 }

@@ -15,12 +15,13 @@ type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string;
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
+const COMMANDS = ["list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
 const HELP = [
   "/pi-mem — open the project memory menu (text status without UI)",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
   "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
+  "/pi-mem history <id> [offset] — inspect retained activity and attribution",
   "/pi-mem move <id> <destination-path> — move lesson and linked history; preserve IDs (path may contain spaces, no quotes)",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
@@ -59,8 +60,15 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   }
 
-  function origin(ctx: ExtensionContext): Origin {
-    return { harness: "pi", session: ctx.sessionManager.getSessionId() };
+  function origin(ctx: ExtensionContext, toolCallId?: string): Origin {
+    // Use the assistant that issued this call, not a potentially changed selected model.
+    const entry = toolCallId === undefined ? undefined : ctx.sessionManager.getBranch().slice().reverse().find((entry) =>
+      entry.type === "message" && entry.message.role === "assistant" &&
+      entry.message.content.some((part) => part.type === "toolCall" && part.id === toolCallId));
+    const message = entry?.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
+    return { harness: "pi", session: ctx.sessionManager.getSessionId(),
+      actor: toolCallId === undefined ? "user" : "model",
+      provider: message?.provider ?? null, model: message?.model ?? null };
   }
 
   function sessionArchives(ctx: ExtensionContext, database: string, scope: string) {
@@ -127,7 +135,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     try {
       const { store, path, scope } = current(ctx);
       const { text } = store.get(scope, id);
-      // Archive provenance is not stored on lesson rows; retain it in this session, outside model context.
+      // Keep a chat card and session footer counter in addition to the database activity log.
       pi.appendEntry<ArchivedLesson>(ARCHIVED_TYPE, { id, text, scope, database: path, session: ctx.sessionManager.getSessionId() });
     } catch (error) {
       if (ctx.hasUI) ctx.ui.notify(`Memory archived, but chat entry failed: ${clipped(String(error), 700)}`, "warning");
@@ -234,23 +242,26 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
-      "add requires priority, an integer from 1 (highest) to 10 (lowest). " +
+      "add and set_priority require priority, an integer from 1 (highest) to 10 (lowest). " +
+      "set_priority requires an active lesson id and changes only its priority; models cannot reprioritize priority 0. " +
+      "reason optionally records why a change was made in the retained activity log. " +
       "Score future usefulness by consequence of ignoring the lesson, likelihood of recurrence, and breadth of applicability. " +
       "1–2: serious damage or corruption; 3–4: recurring failures or expensive debugging; " +
       "5–6: useful recurring knowledge; 7–8: narrow quirks; 9–10: marginal future value. " +
       "supersede inherits priority unless supplied; priority 0 is user-reserved and preserved when superseding. " +
       "Lesson content is retained: supersede rather than edit it; no restore or delete. Exact active duplicates are not added. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
-    promptSnippet: "Add, supersede, or archive project lessons",
+    promptSnippet: "Add, supersede, archive, or reprioritize project lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
       id: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
         description: "Stable lesson number from the #id suffix." })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
+      reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600 })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
       priority: Type.Optional(Type.Integer({ minimum: 1, maximum: 10,
-        description: "Required for add; optional for supersede. 1 = highest priority, 10 = lowest. Zero is user-only." })),
+        description: "Required for add/set_priority; optional for supersede. 1 = highest priority, 10 = lowest. Zero is user-only." })),
     }),
     prepareArguments(args) {
       // Reject coercible values before Pi's schema validation (e.g. true becoming 1).
@@ -266,7 +277,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
       }
-      const result = recordWrite(runMemory(store, scope, params, origin(ctx)), ctx);
+      const result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);
       // Saving succeeded even if a later status/recall refresh fails; report the commit accurately.
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
@@ -298,12 +309,24 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(boundedPage(store.list(scope, { query: rest }), 0), ctx);
         } else if (command === "get") {
           show(store.get(scope, parseLessonId(rest)), ctx);
+        } else if (command === "history") {
+          const [id, offset] = firstWord(rest);
+          const start = offset ? Number(offset) : 0;
+          const page = store.history(scope, parseLessonId(id), start, 5);
+          while (Buffer.byteLength(JSON.stringify(page, null, 2)) > RESULT_BYTES && page.events.length > 1) {
+            page.events.pop();
+            page.nextOffset = start + page.events.length;
+          }
+          if (Buffer.byteLength(JSON.stringify(page, null, 2)) > RESULT_BYTES) {
+            throw new Error("Activity metadata exceeds the command output limit; use the History menu");
+          }
+          show(page, ctx);
         } else if (command === "move") {
           const [value, destination] = firstWord(rest);
           if (!destination) throw new Error("Usage: /pi-mem move <id> <destination-path>");
           const id = parseLessonId(value);
           const { scope: to } = moveDestination(ctx.cwd, destination);
-          const moved = store.moveLesson(scope, id, to);
+          const moved = store.moveLesson(scope, id, to, source);
           show({ id, status: "moved", records: moved, from: scope, to }, ctx);
         } else if (command === "priority") {
           const [id, value] = firstWord(rest);
