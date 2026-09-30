@@ -34,6 +34,15 @@ test("Git worktrees, subdirectories and symlinks share a scope; clones and non-G
   execFileSync("git", ["-C", bare, "worktree", "add", "--quiet", "--detach", bareLinked]);
   assert.equal(projectScope(bareLinked), bare);
   assert.equal(projectScope(bare), bare);
+  execFileSync("git", ["-C", clone, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", root, "vendor"]);
+  const submodule = join(clone, "vendor");
+  const submoduleLinked = join(dir, "submodule-linked");
+  execFileSync("git", ["-C", submodule, "worktree", "add", "--quiet", "--detach", submoduleLinked]);
+  mkdirSync(join(submodule, "nested"));
+  assert.equal(projectScope(submodule), submodule);
+  assert.equal(projectScope(join(submodule, "nested")), submodule);
+  assert.equal(projectScope(submoduleLinked), submodule);
+  assert.notEqual(projectScope(submodule), projectScope(clone));
   const store = new MemoryStore(join(dir, "memory.sqlite"));
   try {
     const origin = { harness: "test", session: null };
@@ -63,6 +72,9 @@ test("Git worktrees, subdirectories and symlinks share a scope; clones and non-G
   execFileSync("git", ["-C", separate, "worktree", "add", "--quiet", "--detach", separateLinked]);
   assert.throws(() => projectScope(separate), /Cannot determine Git project root/);
   assert.throws(() => projectScope(separateLinked), /Cannot determine Git project root/);
+  execFileSync("git", ["-C", separate, "config", "core.worktree", separate]);
+  assert.equal(projectScope(separate), separate);
+  assert.equal(projectScope(separateLinked), separate);
   mkdirSync(join(dir, "plain", "child"), { recursive: true });
   assert.equal(projectScope(join(dir, "plain")), join(dir, "plain"));
   assert.equal(projectScope(join(dir, "plain", "child")), join(dir, "plain", "child"));

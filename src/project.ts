@@ -29,15 +29,24 @@ export function projectScope(cwd: string): string {
       }
       return field.slice(9);
     });
+    let main = realpathSync(paths[0]);
+    if (!records[0].includes("bare") && !existsSync(join(main, ".git"))) {
+      // Submodules report their metadata directory, but core.worktree provides
+      // a main-checkout backlink. Bare gitdir pointers without it are ambiguous.
+      const worktree = execFileSync("git", ["--git-dir", main, "config", "--local", "--get", "core.worktree"], {
+        encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+      }).replace(/\r?\n$/, "");
+      const checkout = realpathSync(resolve(main, worktree));
+      const common = execFileSync("git", ["-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+        encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+      }).replace(/\r?\n$/, "");
+      if (!worktree || realpathSync(common) !== main) throw new Error("Invalid main-checkout backlink");
+      main = checkout;
+      paths[0] = main;
+    }
     if (!paths.some((path) => {
       try { return realpathSync(path) === scope; } catch { return false; }
     })) throw new Error("Current Git root is not a registered worktree");
-    const main = realpathSync(paths[0]);
-    // Separate Git directories have no main-checkout backlink. Do not guess a
-    // shared scope from an unregistered gitdir pointer, which could be planted.
-    if (!records[0].includes("bare") && !existsSync(join(main, ".git"))) {
-      throw new Error("Cannot identify the main checkout for a separate Git directory");
-    }
     return main;
   } catch (error) {
     // Do not silently create a different bucket when a known repository is broken.
