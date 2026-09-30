@@ -50,11 +50,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
-  const expectStatus = (loaded: number, total: number, text: string, added = 0, archived = 0) => {
+  const expectStatus = (loaded: number, _total: number, text: string, added = 0, archived = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = formatTokens(Math.ceil(text.length / 4));
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded === total ? loaded : `${loaded}/${total}`}${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded}|0${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -101,7 +101,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       await assert.rejects(execute({ ...input, priority }), /priority must/);
     }
     await assert.rejects(execute({ ...input, priority: undefined }), /priority must/);
-    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
+    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
@@ -284,6 +284,14 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler(`priority ${extremeReplacement.id} false`, ctx);
     assert.match(notices.at(-1)!, /Usage:/);
     assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
+    await command.handler("global add Global CLI lesson.", ctx);
+    await command.handler("global add Another CLI lesson.", ctx);
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
+    await command.handler("reload", ctx);
+    const combined = (await event("context", { messages: [] })).messages[0].content;
+    assert.match(combined, /^GLOBAL LESSONS[\s\S]*lessons omitted[\s\S]*PROJECT LESSONS[\s\S]*lessons omitted/);
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+8 -3) ~${formatTokens(Math.ceil(combined.length / 4))} \x1b[0m`,
+      "footer splits loaded scopes, combines changes/tokens, and hides omission totals");
   } finally {
     await event("session_shutdown", { reason: "quit" });
     inspection?.close();

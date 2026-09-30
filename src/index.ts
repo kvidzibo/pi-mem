@@ -102,8 +102,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const archived = projectChanges.superseded + globalChanges.superseded +
         sessionArchives(ctx, path, scope) + sessionArchives(ctx, path, GLOBAL_SCOPE);
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-      const total = page.total + globalPage.total;
-      const count = result.loaded === total ? `${result.loaded}` : `${result.loaded}/${total}`;
+      const count = `${project.loaded}|${global.loaded}`;
       // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
       ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} \x1b[0m`);
     }
