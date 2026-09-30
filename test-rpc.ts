@@ -70,7 +70,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
           return;
         }
         browseRootSeen = true;
-        assert.equal(event.options?.length, 8);
+        assert.equal(event.options?.length, 9);
         assert.deepEqual(event.options?.slice(0, 3), ["Browse / search lessons", "Add lesson", "Archived lessons"]);
         value = "Browse / search lessons";
       } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
@@ -188,7 +188,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     const emptyMenu = events.find((event) => event.method === "select" && event.title?.startsWith("Memory · other"));
     assert.ok(emptyMenu);
     assert.match(emptyMenu!.title!, /0 active · 0 loaded into context/);
-    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "All projects", "Move memory", "Status & limits", "Reload memory", "Help"]);
+    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Global lessons", "All projects", "Move memory", "Status & limits", "Reload memory", "Help"]);
     const recalled = await command("/pi-mem reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
     assert.match(recalled, /^Database: .+\nPROJECT LESSONS$/);

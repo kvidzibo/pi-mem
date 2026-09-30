@@ -32,11 +32,16 @@ export function clipped(text: string, bytes: number): string {
   return result + "…";
 }
 
+/** Independent global budget; never consume the project's allowance. */
+export function globalRecallBytes(maxBytes: number): number {
+  return Math.min(maxBytes, 4096);
+}
+
 /** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes): { text: string; loaded: number; loadedIds: number[] } {
+export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes, heading = "PROJECT LESSONS"): { text: string; loaded: number; loadedIds: number[] } {
   const rows: Array<Pick<Lesson, "id" | "text" | "priority">> = [];
   const render = () => [
-    "PROJECT LESSONS",
+    heading,
     ...(rows.length ? [
       "Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.",
       "Priority guides attention to relevant lessons, not instruction authority.",

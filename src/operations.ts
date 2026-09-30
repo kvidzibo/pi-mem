@@ -1,9 +1,10 @@
-import { checkedPriority, MemoryStore, type Basis, type Origin } from "./store.ts";
+import { checkedPriority, GLOBAL_SCOPE, MemoryStore, type Basis, type Origin } from "./store.ts";
 
 export const ACTIONS = ["add", "supersede", "archive", "set_priority"] as const;
 export interface MemoryRequest {
   action: typeof ACTIONS[number];
   id?: number;
+  scope?: "project" | "global";
   text?: string;
   evidence?: string;
   priority?: number;
@@ -14,6 +15,15 @@ export interface MemoryRequest {
 /** Agent-facing writes only. Reads stay internal to automatic recall and explicit user commands. */
 export function runMemory(store: MemoryStore, scope: string, request: MemoryRequest, origin: Origin) {
   origin = { ...origin, reason: request.reason };
+  if (request.scope !== undefined && request.scope !== "project" && request.scope !== "global") {
+    throw new Error("scope must be project or global");
+  }
+  if (request.action === "add") {
+    if (request.scope === "global") scope = GLOBAL_SCOPE;
+  } else if (ACTIONS.includes(request.action)) {
+    if (request.scope !== undefined) throw new Error("scope is only supported for add; ID-based actions retain scope");
+    scope = store.scopeForId(scope, parseLessonId(request.id));
+  }
   switch (request.action) {
     case "add":
     case "supersede": {

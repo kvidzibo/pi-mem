@@ -91,6 +91,9 @@ function lesson(row: Record<string, unknown>): Lesson {
   return { ...data, archived: row.archived === 1 } as unknown as Lesson;
 }
 
+/** Reserved non-path scope: cannot collide with a canonical project directory. */
+export const GLOBAL_SCOPE = "global";
+
 /** Harness-neutral SQLite storage. Every read/write is restricted to an exact scope. */
 export class MemoryStore {
   private db: DatabaseSync;
@@ -353,7 +356,9 @@ export class MemoryStore {
   }
 
   private checkScope(scope: string): void {
-    if (!isAbsolute(scope) || scope.includes("\0")) throw new Error("Memory scope must be an absolute project path");
+    if (scope !== GLOBAL_SCOPE && (!isAbsolute(scope) || scope.includes("\0"))) {
+      throw new Error("Memory scope must be an absolute project path or global");
+    }
   }
 
   private checkOrigin(origin: Origin): void {
@@ -420,6 +425,15 @@ export class MemoryStore {
       this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
       return Number(result.changes);
     });
+  }
+
+  /** Resolve only IDs visible to this session, never another project's lessons. */
+  scopeForId(project: string, id: number): string {
+    this.checkScope(project);
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
+    const row = this.db.prepare("SELECT scope FROM lessons WHERE id = ? AND scope IN (?, ?)").get(id, project, GLOBAL_SCOPE);
+    if (!row) throw new Error("Lesson not found in this project or global scope");
+    return String(row.scope);
   }
 
   get(scope: string, id: number): Lesson {

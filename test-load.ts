@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MemoryStore } from "./src/store.ts";
+import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { formatTokens, memoryContext } from "./src/presentation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -73,7 +73,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "scope", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
@@ -552,6 +552,20 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await command.handler(`move ${retained.id}`, ctx);
     assert.match(notices.at(-1)!, /Usage: \/pi-mem move/);
     ctx.cwd = project;
+
+    steps.push({ title: "Memory ·", choice: "Global lessons" },
+      { title: "Global lessons", choice: "Add lesson" },
+      { title: "Add lesson", text: "Check CLI dry runs." },
+      { title: "Review new lesson", choice: "Save", match: /global lesson for recall in every project/ },
+      { title: "Global lessons", choice: "Active lessons" },
+      { title: "Browse / search", choice: "Check CLI dry runs.", match: /Global/ },
+      { title: "Lesson details", choice: "Delete (archive)", match: /Global[\s\S]*active · loaded into recall/ },
+      { title: "Archive lesson?", choice: "Archive" },
+      { title: "Browse / search", choice: "Back" },
+      { title: "Global lessons", choice: "Back" }, { title: "Memory ·" });
+    await run();
+    assert.equal(observer.list(GLOBAL_SCOPE, { state: "archived" }).total, 1);
+    assert.equal(observer.list(GLOBAL_SCOPE).total, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
     const total = observer.list(project).total;

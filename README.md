@@ -2,7 +2,7 @@
 
 [npm](https://www.npmjs.com/package/@kvidzibo/pi-mem) · [Pi package directory](https://pi.dev/packages)
 
-SQLite-backed project memory for Pi. Active lessons are recalled automatically; the agent can **add**, **supersede**, **archive**, or **reprioritize** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
+SQLite-backed project and global memory for Pi. Active lessons are recalled automatically; the agent can **add**, **supersede**, **archive**, or **reprioritize** them. Replacements preserve old records rather than overwriting them. There is no restore or delete operation.
 
 No transcript harvesting, embeddings, or background model calls. Memory is stored and recalled only through SQLite; Markdown files are not read or written.
 
@@ -27,6 +27,8 @@ The agent's `memory` tool exposes only:
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
 - **`set_priority`** — supply an active lesson's `id` and `priority` **1–10**. Content and ID stay unchanged; models cannot reprioritize priority-0 lessons.
 
+For **add**, the agent chooses `scope: "global"` for cross-project lessons or unrelated CLI usage; otherwise `scope: "project"` (the default). No separate user request is needed for global scope. ID-based actions retain the lesson's scope and can target only current-project or global lessons; omit `scope` for these actions. Duplicate detection is scope-local.
+
 Every tool action accepts an optional `reason` (up to 600 characters), retained in its activity log.
 
 Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Unscored migrated records default to **5**; migration makes no model calls.
@@ -36,6 +38,7 @@ There are no agent read/search/history actions. An archived record cannot be sup
 Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
+- **Global lessons** opens shared active/archived lessons, with add, replace, priority, archive, and history actions. These lessons are recalled in every project using this database; project move actions exclude them.
 - **All projects** lists every stored project in the current database, including archived-only projects and missing folders. Select a project to browse and manage its lessons without switching cwd or recalling its memories here.
 - Select an active lesson to open **Set priority:** with **Delete (archive)** followed by priorities **0–10**. Priority changes apply immediately; Delete asks for confirmation and archives rather than erasing the record. History, replacement, and move actions remain available below.
 - Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Every change is recorded atomically in an append-only SQLite activity log. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
@@ -46,9 +49,9 @@ Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mo
 
 Use arrow keys and Enter to navigate, Escape to go back/close, and Page Up/Down to scroll long details (respecting configured keybindings). Browsing stays out of conversation history and makes no model calls. In the terminal browser, type to filter lesson text/evidence immediately (literal substring, up to 200 characters); Backspace edits the query. RPC clients retain the Search dialog. Search and page selection survive returning from lesson details. Session changes or memory reloads invalidate pending menu actions.
 
-The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or `🧠 loaded/active (+A -R) ~N` when some are omitted. `~N` is the estimated token count, using Pi's compact units (e.g. `~132`, `~1.2k`, `~12k`, `~1.2M`); the whole status has a space on either side. Zero session-change counts are omitted. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
+The footer shows `🧠 loaded (+A -R) ~N` when all active lessons are loaded, or `🧠 loaded/active (+A -R) ~N` when some are omitted. `~N` is the estimated token count, using Pi's compact units (e.g. `~132`, `~1.2k`, `~12k`, `~1.2M`); the whole status has a space on either side. Zero session-change counts are omitted. Counts include current-project and global lessons. It tracks this session's additions and archives separately: adding then archiving gives `(+1 -1)`, as does superseding an existing lesson. Duplicates and already-archived records do not count again. Counts survive reload/resume; new sessions and forks start at zero. Other sessions' changes do not count.
 
-Saves and archives in the current project add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Changes to other projects retain database activity history but do not add chat entries or affect this session's change counts.
+Saves and archives in the current project or global scope add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Changes to other projects retain database activity history but do not add chat entries or affect this session's change counts.
 
 Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, priorities, integer IDs, heading/legend, and any omission notice—but excludes evidence, other metadata, and omitted/archived lessons.
 
@@ -57,6 +60,7 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | Command | Purpose |
 |---|---|
 | `/pi-mem` | Open the project memory menu; text status without UI |
+| `/pi-mem global add\|list\|archived\|search …` | Run these commands in global scope; ID commands resolve either current-project or global IDs |
 | `/pi-mem add [--priority 0–10] <lesson>` | Save explicitly; default priority 5 |
 | `/pi-mem supersede <id> [--priority 0–10] <lesson>` | Replace and archive the original; inherit priority by default |
 | `/pi-mem priority <id> <0–10>` | Change active priority without replacing content |
@@ -94,8 +98,9 @@ Limits must be positive safe integers; `maxRecallBytes` must be at least **64** 
 
 Words are whitespace-separated; overlong saves fail rather than truncate. Text/evidence also have hard caps of 1,200/600 characters. Lowering limits does not rewrite existing lessons.
 
-- **Scope:** the canonical Git worktree root, or canonical cwd outside Git. Subdirectories share a worktree's lessons; separate worktrees/clones remain separate. There is no global or parent-project inheritance. Scope follows Pi's cwd, not a shell tool's `cd`.
+- **Scope:** the canonical Git worktree root, or canonical cwd outside Git. Subdirectories share a worktree's lessons; separate worktrees/clones remain separate. Global lessons use a reserved non-path scope in the same database and are recalled across projects. There is no parent-project inheritance. Project scope follows Pi's cwd, not a shell tool's `cd`.
 - **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load lowest-numbered priority first, then newest-created, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading/legend, priority labels, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
+- **Global recall:** appears first under `GLOBAL LESSONS` when active global lessons exist, followed by `PROJECT LESSONS`. Global lessons have a separate budget of `maxRecallLessons` and **min(maxRecallBytes, 4 KiB)**; they do not consume the project budget. Ordering and omission rules apply independently to each scope.
 - **Archiving:** changes future database recall only. It cannot erase text already present elsewhere in a conversation or sent to a model.
 
 The injected SQLite block contains priority-labelled bullets with stable IDs:
@@ -116,6 +121,7 @@ This is one replaceable, UI-hidden user-role message before the conversation, no
 
 - Store no secrets or raw transcripts. SQLite storage is local and newly created database files are private (`0600`), but **not encrypted**. Recalled lessons and project paths go to the selected model, including hosted providers. Print/JSON command reports can persist in session history and later model context.
 - Use a **local filesystem with SQLite WAL support**, not a concurrently accessed network share. Use SQLite's backup API/command, or close all connections before copying; copying only a live database file can omit WAL data.
+- Global scope needs no new schema migration. Older versions do not recall global lessons and cannot manage their reserved scope; reload all sessions after upgrading.
 - **Back up before upgrading.** Schema v1–v6 databases upgrade atomically to **v7** on open. Pre-v6 records initially receive priority **5**; v6 priorities and priority-change history are preserved. Lesson content and history are retained; old UUIDs are used only to remap predecessor links, then discarded. Existing integer IDs remain unchanged. Historical activity is reconstructed only from retained facts; missing actors, models, dates, and earlier changes remain unknown. Existing lessons can then be explicitly reviewed and reprioritized; no automatic model scoring runs on startup. Previously overwritten content cannot be recovered. Older releases cannot open v7: keep v7-capable code or a compatible backup for rollback. `/reload` **all** Pi sessions after upgrading; already-open old clients are not compatible with migrated storage.
 
 ## Development and validation
