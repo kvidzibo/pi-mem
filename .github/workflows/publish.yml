@@ -2,7 +2,7 @@ name: Publish to npm
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
 
 permissions:
   contents: read
@@ -27,13 +27,13 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Check release tag
+      - name: Check release version
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
           const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
-          if (!/^\d+\.\d+\.\d+$/.test(version) || process.env.GITHUB_REF_NAME !== `v${version}`) {
-            throw new Error('Tag must match a stable package version: v<major>.<minor>.<patch>');
+          if (!/^\d+\.\d+\.\d+$/.test(version)) {
+            throw new Error('Package version must be stable: <major>.<minor>.<patch>');
           }
           NODE
       - name: Install UI test wrapper
@@ -60,5 +60,23 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Publish using npm trusted publishing
-        run: npm publish --ignore-scripts
+      - name: Publish if version is new
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          # Fail on registry errors rather than treating them as an unpublished version.
+          VERSIONS=$(npm view "$NAME" versions --json)
+          PUBLISHED=$(VERSIONS="$VERSIONS" VERSION="$VERSION" node --input-type=module <<'NODE'
+          const versions = JSON.parse(process.env.VERSIONS);
+          if (!Array.isArray(versions) || !versions.every(version => typeof version === 'string')) {
+            throw new Error('Unexpected npm versions response');
+          }
+          console.log(versions.includes(process.env.VERSION));
+          NODE
+          )
+          if [ "$PUBLISHED" = true ]; then
+            echo "Skip: $NAME@$VERSION already on npm"
+          else
+            npm publish --ignore-scripts --access public --provenance
+          fi

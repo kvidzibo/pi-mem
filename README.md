@@ -132,7 +132,7 @@ npm audit
 
 One-time bootstrap: after review, run `npm login` and `npm publish --ignore-scripts` for the first release. In npm package settings, add a GitHub Actions trusted publisher with owner **kvidzibo**, repository **pi-mem**, and workflow **publish.yml** (no environment). Allow direct `npm publish`. CI uses OIDC, not your local login or an npm token secret.
 
-For later releases, bump `package.json` and `package-lock.json` together (`npm version patch --no-git-tag-version`, or `minor`/`major`) in a PR. After merging, tag the merged commit with the matching `v<version>` and push that tag. `.github/workflows/publish.yml` tests on Node 22.19 and 24 before publishing publicly with provenance. Only stable versions are supported; mismatched tags fail before publishing. Do not tag the already-published bootstrap version: npm versions cannot be republished. Protect release tags so only maintainers can create them.
+For later releases, bump `package.json` and `package-lock.json` together (`npm version patch --no-git-tag-version`, or `minor`/`major`) in a PR. Every push to `main` runs `.github/workflows/publish.yml`: tests on Node 22.19 and 24 must pass before a new version publishes publicly with provenance. Already-published versions are skipped; registry lookup failures stop publishing. Only stable versions are supported. No release tag is needed.
 
 ## License
 
