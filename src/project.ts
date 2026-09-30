@@ -16,7 +16,18 @@ export function projectScope(cwd: string): string {
     }).replace(/\r?\n$/, "");
     const scope = realpathSync(root);
     if (!isInside(scope, directory)) throw new Error("Git root does not contain the current directory");
-    return scope;
+    // Git lists the main worktree first, using the repository's shared metadata.
+    // Keep its existing path as the project key. Bare/separate Git directories
+    // use Git's reported main-worktree path (the shared metadata directory).
+    // NUL delimiters preserve paths containing newlines or Git quoting characters.
+    const worktrees = execFileSync("git", ["-C", directory, "worktree", "list", "--porcelain", "-z"], {
+      encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const first = worktrees.split("\0", 1)[0];
+    if (!first.startsWith("worktree ") || !isAbsolute(first.slice(9))) {
+      throw new Error("Cannot determine main Git worktree");
+    }
+    return realpathSync(first.slice(9));
   } catch (error) {
     // Do not silently create a different bucket when a known repository is broken.
     for (let dir = directory; ; dir = dirname(dir)) {
