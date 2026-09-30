@@ -34,7 +34,7 @@ export function clipped(text: string, bytes: number): string {
 
 /** Independent global budget; never consume the project's allowance. */
 export function globalRecallBytes(maxBytes: number): number {
-  return Math.min(maxBytes, 4096);
+  return maxBytes;
 }
 
 /** One replaceable block, never a growing chain of persisted session messages. */
