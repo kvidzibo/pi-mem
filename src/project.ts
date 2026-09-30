@@ -16,7 +16,38 @@ export function projectScope(cwd: string): string {
     }).replace(/\r?\n$/, "");
     const scope = realpathSync(root);
     if (!isInside(scope, directory)) throw new Error("Git root does not contain the current directory");
-    return scope;
+    // Git lists the main worktree first, using the repository's shared metadata.
+    // Keep its existing path as the project key (the Git directory for bare repos).
+    // NUL delimiters preserve paths containing newlines or Git quoting characters.
+    const worktrees = execFileSync("git", ["-C", directory, "worktree", "list", "--porcelain", "-z"], {
+      encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const records = worktrees.split("\0\0").filter(Boolean).map((record) => record.split("\0"));
+    const paths = records.map(([field]) => {
+      if (!field.startsWith("worktree ") || !isAbsolute(field.slice(9))) {
+        throw new Error("Cannot determine main Git worktree");
+      }
+      return field.slice(9);
+    });
+    let main = realpathSync(paths[0]);
+    if (!records[0].includes("bare") && !existsSync(join(main, ".git"))) {
+      // Submodules report their metadata directory, but core.worktree provides
+      // a main-checkout backlink. Bare gitdir pointers without it are ambiguous.
+      const worktree = execFileSync("git", ["--git-dir", main, "config", "--local", "--get", "core.worktree"], {
+        encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+      }).replace(/\r?\n$/, "");
+      const checkout = realpathSync(resolve(main, worktree));
+      const common = execFileSync("git", ["-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+        encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
+      }).replace(/\r?\n$/, "");
+      if (!worktree || realpathSync(common) !== main) throw new Error("Invalid main-checkout backlink");
+      main = checkout;
+      paths[0] = main;
+    }
+    if (!paths.some((path) => {
+      try { return realpathSync(path) === scope; } catch { return false; }
+    })) throw new Error("Current Git root is not a registered worktree");
+    return main;
   } catch (error) {
     // Do not silently create a different bucket when a known repository is broken.
     for (let dir = directory; ; dir = dirname(dir)) {
