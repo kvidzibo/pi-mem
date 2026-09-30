@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MemoryStore } from "./src/store.ts";
+import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { formatTokens, memoryContext } from "./src/presentation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -50,11 +50,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   mkdirSync(join(directory, "other"));
   let extension: Awaited<ReturnType<typeof load>>;
   let inspection: MemoryStore | undefined;
-  const expectStatus = (loaded: number, total: number, text: string, added = 0, archived = 0) => {
+  const expectStatus = (loaded: number, _total: number, text: string, added = 0, archived = 0) => {
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = formatTokens(Math.ceil(text.length / 4));
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded === total ? loaded : `${loaded}/${total}`}${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded}|0${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -73,7 +73,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "scope", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
@@ -101,7 +101,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
       await assert.rejects(execute({ ...input, priority }), /priority must/);
     }
     await assert.rejects(execute({ ...input, priority: undefined }), /priority must/);
-    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
+    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
@@ -284,6 +284,14 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     await command.handler(`priority ${extremeReplacement.id} false`, ctx);
     assert.match(notices.at(-1)!, /Usage:/);
     assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
+    await command.handler("global add Global CLI lesson.", ctx);
+    await command.handler("global add Another CLI lesson.", ctx);
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
+    await command.handler("reload", ctx);
+    const combined = (await event("context", { messages: [] })).messages[0].content;
+    assert.match(combined, /^GLOBAL LESSONS[\s\S]*lessons omitted[\s\S]*PROJECT LESSONS[\s\S]*lessons omitted/);
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+8 -3) ~${formatTokens(Math.ceil(combined.length / 4))} \x1b[0m`,
+      "footer splits loaded scopes, combines changes/tokens, and hides omission totals");
   } finally {
     await event("session_shutdown", { reason: "quit" });
     inspection?.close();
@@ -552,6 +560,20 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await command.handler(`move ${retained.id}`, ctx);
     assert.match(notices.at(-1)!, /Usage: \/pi-mem move/);
     ctx.cwd = project;
+
+    steps.push({ title: "Memory ·", choice: "Global lessons" },
+      { title: "Global lessons", choice: "Add lesson" },
+      { title: "Add lesson", text: "Check CLI dry runs." },
+      { title: "Review new lesson", choice: "Save", match: /global lesson for recall in every project/ },
+      { title: "Global lessons", choice: "Active lessons" },
+      { title: "Browse / search", choice: "Check CLI dry runs.", match: /Global/ },
+      { title: "Lesson details", choice: "Delete (archive)", match: /Global[\s\S]*active · loaded into recall/ },
+      { title: "Archive lesson?", choice: "Archive" },
+      { title: "Browse / search", choice: "Back" },
+      { title: "Global lessons", choice: "Back" }, { title: "Memory ·" });
+    await run();
+    assert.equal(observer.list(GLOBAL_SCOPE, { state: "archived" }).total, 1);
+    assert.equal(observer.list(GLOBAL_SCOPE).total, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
     const total = observer.list(project).total;

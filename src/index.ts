@@ -6,18 +6,19 @@ import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
-import { boundedPage, clipped, formatTokens, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
+import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
-import { checkedPriority, DEFAULT_PRIORITY, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
+import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const CONTEXT_TYPE = "pi-mem-context";
-const COMMANDS = ["list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
+const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
 const HELP = [
-  "/pi-mem — open the project memory menu (text status without UI)",
+  "/pi-mem — open the memory menu (text status without UI)",
+  "/pi-mem global add|list|archived|search … — manage global lessons; ID commands resolve project or global lessons",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
   "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
@@ -85,13 +86,23 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function snapshot(ctx: ExtensionContext) {
     const { store, path, scope, limits } = current(ctx);
     const page = store.recall(scope);
-    const result = memoryContext(page, limits.maxRecallBytes);
+    const project = memoryContext(page, limits.maxRecallBytes);
+    const globalPage = store.recall(GLOBAL_SCOPE);
+    const global = memoryContext(globalPage, globalRecallBytes(limits.maxRecallBytes), "GLOBAL LESSONS");
+    const result = {
+      text: globalPage.total ? `${global.text}\n\n${project.text}` : project.text,
+      loaded: project.loaded + global.loaded,
+      loadedIds: [...global.loadedIds, ...project.loadedIds],
+    };
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
-      const { added, superseded } = store.sessionCreations(scope, origin(ctx));
-      const archived = superseded + sessionArchives(ctx, path, scope);
+      const projectChanges = store.sessionCreations(scope, origin(ctx));
+      const globalChanges = store.sessionCreations(GLOBAL_SCOPE, origin(ctx));
+      const added = projectChanges.added + globalChanges.added;
+      const archived = projectChanges.superseded + globalChanges.superseded +
+        sessionArchives(ctx, path, scope) + sessionArchives(ctx, path, GLOBAL_SCOPE);
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-      const count = result.loaded === page.total ? `${result.loaded}` : `${result.loaded}/${page.total}`;
+      const count = `${project.loaded}|${global.loaded}`;
       // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
       ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} \x1b[0m`);
     }
@@ -120,7 +131,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     try {
       const { store, scope } = current(ctx);
       const lessons: SavedLesson[] = ids.map((id) => {
-        const { text, supersedes_id } = store.get(scope, id);
+        const { text, supersedes_id } = store.get(store.scopeForId(scope, id), id);
         return { id, text, supersedes_id };
       });
       // Durable chat-only entries: no extra model context, steering, or agent turn.
@@ -133,7 +144,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function recordArchived(id: number, ctx: ExtensionContext) {
     try {
-      const { store, path, scope } = current(ctx);
+      const { store, path, scope: project } = current(ctx);
+      const scope = store.scopeForId(project, id);
       const { text } = store.get(scope, id);
       // Keep a chat card and session footer counter in addition to the database activity log.
       pi.appendEntry<ArchivedLesson>(ARCHIVED_TYPE, { id, text, scope, database: path, session: ctx.sessionManager.getSessionId() });
@@ -237,8 +249,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory",
-    label: "Project memory",
-    description: "Write project lessons. Active lessons are recalled automatically; no on-demand reads. " +
+    label: "Memory",
+    description: "Write project or global lessons. Active lessons are recalled automatically; no on-demand reads. " +
+      "Choose global scope for cross-project lessons or unrelated CLI usage; otherwise use project (default). " +
+      "ID-based actions retain scope and target only current-project or global lessons. " +
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
@@ -251,9 +265,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "supersede inherits priority unless supplied; priority 0 is user-reserved and preserved when superseding. " +
       "Lesson content is retained: supersede rather than edit it; no restore or delete. Exact active duplicates are not added. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
-    promptSnippet: "Add, supersede, archive, or reprioritize project lessons",
+    promptSnippet: "Add, supersede, archive, or reprioritize project and global lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
+      scope: Type.Optional(StringEnum(["project", "global"] as const, {
+        description: "Scope for add only; defaults to project. ID-based actions retain the existing scope.",
+      })),
       id: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
         description: "Stable lesson number from the #id suffix." })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
@@ -291,11 +308,22 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
     async handler(args, ctx) {
       try {
-        const [command, rest] = firstWord(args);
+        let [command, rest] = firstWord(args);
+        const globalCommand = command === "global";
+        if (globalCommand) {
+          [command, rest] = firstWord(rest);
+          if (!["add", "list", "archived", "search"].includes(command)) {
+            throw new Error("Usage: /pi-mem global add|list|archived|search …; use IDs directly for other actions");
+          }
+        }
         if (command === "help") { show(HELP, ctx); return; }
         if (!command && ctx.hasUI) { await openMenu(ctx); return; }
         if (command === "reload") reset();
-        const { store, path, scope } = current(ctx);
+        const { store, path, scope: project } = current(ctx);
+        let scope = globalCommand ? GLOBAL_SCOPE : project;
+        if (["get", "history", "move", "priority", "supersede", "archive"].includes(command)) {
+          scope = store.scopeForId(project, parseLessonId(firstWord(rest)[0]));
+        }
         const source = origin(ctx);
         if (!command || command === "reload") {
           show(`Database: ${JSON.stringify(path)}\n${recall(ctx)}`, ctx);
@@ -322,6 +350,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           }
           show(page, ctx);
         } else if (command === "move") {
+          if (scope === GLOBAL_SCOPE) throw new Error("Global lessons cannot be moved with project commands");
           const [value, destination] = firstWord(rest);
           if (!destination) throw new Error("Usage: /pi-mem move <id> <destination-path>");
           const id = parseLessonId(value);
