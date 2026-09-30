@@ -362,7 +362,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           tui.terminal.rows = 80;
           component.invalidate();
           if (step.choice) {
-            for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && line.includes(step.choice!)); count++) {
+            for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && (/^\d+$/.test(step.choice!) ? line.slice(2).split(" —")[0].trim() === step.choice : line.includes(step.choice!))); count++) {
               assert.ok(count < 1020, `choice ${step.choice} not found: ${screen()}`);
               component.handleInput("\x1b[B");
             }
@@ -407,9 +407,9 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Browse / search", choice: "Seed 0. Corrected.", match: /Search: Seed 0\./ },
       { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: #${original.id}`) },
       { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
-      { title: "Lesson details", choice: "Archive…" },
+      { title: "Lesson details", choice: "Delete (archive)" },
       { title: "Archive lesson?", choice: "Cancel", match: /future recall[\s\S]*already in a conversation/ },
-      { title: "Lesson details", choice: "Archive…" },
+      { title: "Lesson details", choice: "Delete (archive)" },
       { title: "Archive lesson?", choice: "Archive" },
       { title: "Browse / search", choice: "Back", match: /No lessons found/ },
       { title: "Memory ·", choice: "Add lesson" },
@@ -420,8 +420,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Review new lesson", choice: "Save", match: /Priority: 0/ },
       { title: "Memory ·", choice: "Browse / search lessons" },
       { title: "Browse / search", choice: "New menu lesson.", match: /\[P0\]/ },
-      { title: "Lesson details", choice: "Change priority…", match: /Priority: 0/ },
-      { title: "Lesson priority", choice: "5" },
+      { title: "Lesson details", choice: "5", match: /Priority: 0/ },
       { title: "Lesson details", choice: "History", match: /Priority: 5/ },
       { title: "History ·", choice: "priority", match: /Retained changes only/ },
       { title: "Activity ·", choice: "Back", match: /Actor: user[\s\S]*Session: menu-session/ },
@@ -447,6 +446,36 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, 1,
       "only approved menu archives should add archive entries");
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
+
+    // Cross-project actions target the selected scope without polluting this session's archive cards.
+    const foreignScope = join(directory, "foreign-missing-project");
+    const foreign = observer.add(foreignScope, { text: "Foreign project lesson.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
+    const archiveCardsBefore = ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length;
+    steps.push(
+      { title: "Memory ·", choice: "All projects" },
+      { title: "All projects", choice: foreignScope },
+      { title: "Project memories", choice: "Active lessons" },
+      { title: "Browse / search", choice: foreign.text, match: /Other project/ },
+      { title: "Lesson details", choice: "0", match: /other project \(not recalled here\)/ },
+      { title: "Lesson details", choice: "Delete (archive)", match: /Priority: 0/ },
+      { title: "Archive lesson?", choice: "Cancel" },
+      { title: "Lesson details", choice: "Delete (archive)" },
+      { title: "Archive lesson?", choice: "Archive" },
+      { title: "Browse / search", choice: "Back", match: /No lessons found/ },
+      { title: "Project memories", choice: "Archived lessons" },
+      { title: "Archived lessons", choice: foreign.text },
+      { title: "Lesson details", choice: "History", match: /archived \(not recalled\)/ },
+      { title: "History ·", choice: "Back", match: /archive[\s\S]*priority/ },
+      { title: "Lesson details", choice: "Back" },
+      { title: "Archived lessons", choice: "Back" },
+      { title: "Project memories", choice: "Back" },
+      { title: "All projects", choice: "Back" },
+      { title: "Memory ·", match: /1002 active/ },
+    );
+    await run();
+    assert.equal(observer.get(foreignScope, foreign.id).priority, 0);
+    assert.equal(observer.get(foreignScope, foreign.id).archived, true);
+    assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, archiveCardsBefore);
 
     // Move lists even missing/archived-only scopes, prefills cwd, and preserves retained IDs.
     const oldScope = join(directory, "missing-old-folder");
