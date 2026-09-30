@@ -7,7 +7,7 @@ export const words = (text: string) => text.trim() ? text.trim().split(/\s+/u).l
 /** A scrollable read-only body and keyboard selector. Never writes a session message. */
 export async function menuChoice(ctx: ExtensionContext, title: string, body: string, items: SelectItem[],
   signal: AbortSignal, selected?: string,
-  search?: { query: string; update: (query: string) => { body: string; items: SelectItem[] } }): Promise<string | undefined> {
+  search?: { query: string; hint?: string; update: (query: string) => { body: string; items: SelectItem[]; selected?: string } }): Promise<string | undefined> {
   signal.throwIfAborted();
   const sanitize = (rows: SelectItem[]) => rows.map((item) => ({ ...item, label: visible(item.label).replace(/\n/g, " "),
     description: item.description ? visible(item.description).replace(/\n/g, " ") : undefined }));
@@ -45,19 +45,22 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
         listHeight = Math.max(1, Math.min(items.length, 10, Math.floor((height - 3) / (body ? 2 : 1))));
         bodyHeight = Math.max(0, height - listHeight - 4 - (search ? 2 : 0));
         offset = Math.max(0, Math.min(offset, bodyRows.length - bodyHeight));
-        const list = new SelectList(safeItems, listHeight, {
+        // SelectList measures every supplied row on render; keep large pages responsive by passing only the viewport.
+        const start = Math.max(0, Math.min(index - Math.floor(listHeight / 2), items.length - listHeight));
+        const list = new SelectList(safeItems.slice(start, start + listHeight), listHeight, {
           selectedPrefix: (s) => theme.fg("accent", s), selectedText: (s) => theme.fg("accent", s),
           description: (s) => theme.fg("muted", s), scrollInfo: (s) => theme.fg("dim", s), noMatch: (s) => s,
         });
-        list.setSelectedIndex(index);
+        list.setSelectedIndex(index - start);
         const scrolling = bodyRows.length > bodyHeight;
         const scrollHint = scrolling ? ` · ${key("tui.select.pageUp")}/${key("tui.select.pageDown")} scroll text` : "";
         return [
           theme.fg("accent", theme.bold(visible(title).replace(/\n/g, " "))),
-          ...(search ? [theme.fg("dim", "Type to search text / evidence (max 200 characters)"), ...input.render(w)] : []),
+          ...(search ? [theme.fg("dim", search.hint ?? "Type to search text / evidence (max 200 characters)"), ...input.render(w)] : []),
           ...bodyRows.slice(offset, offset + bodyHeight),
           ...(scrolling ? [theme.fg("dim", `Text ${offset + 1}–${offset + bodyHeight}/${bodyRows.length}${scrollHint}`)] : []),
           ...list.render(Math.max(5, w)),
+          ...(items.length > listHeight ? [theme.fg("dim", `  (${index + 1}/${items.length})`)] : []),
           theme.fg("dim", `${key("tui.select.up")}/${key("tui.select.down")} navigate · ${key("tui.select.confirm")} select · ${key("tui.select.cancel")} back`),
         ].map((line) => truncateToWidth(line, w));
       },
@@ -83,7 +86,7 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
               body = result.body;
               items = result.items;
               safeItems = sanitize(items);
-              index = 0;
+              index = Math.max(0, items.findIndex((item) => item.value === result.selected));
               offset = 0;
             } catch (error) {
               ctx.ui.notify(visible(error instanceof Error ? error.message : String(error)), "error");
@@ -136,7 +139,7 @@ export async function destinationInput(ctx: ExtensionContext, initial: string, s
 
 /** Use Pi's editor with a live word counter; submitting only advances to the save preview. */
 export async function lessonEditor(ctx: ExtensionContext, title: string, text: string, maxWords: number,
-  signal: AbortSignal): Promise<string | undefined> {
+  signal: AbortSignal, scope = ""): Promise<string | undefined> {
   signal.throwIfAborted();
   // Match Editor's whitespace normalization, but retain exact original text on an unchanged submission.
   const normalized = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
@@ -145,7 +148,7 @@ export async function lessonEditor(ctx: ExtensionContext, title: string, text: s
   if (ctx.mode !== "tui") {
     // RPC's editor has no AbortSignal support. A cancellable input avoids leaving a command waiting after reload.
     const current = text ? `\nCurrent lesson:\n${safe}\nLeave blank to keep the current lesson.` : "";
-    const result = await ctx.ui.input(`${title} — at most ${maxWords} words; submit to review${current}`, "Lesson text", { signal });
+    const result = await ctx.ui.input(`${title}${scope ? `\n${visible(scope)}` : ""} — at most ${maxWords} words; submit to review${current}`, "Lesson text", { signal });
     signal.throwIfAborted();
     return result === "" && text ? text : result;
   }
@@ -167,7 +170,9 @@ export async function lessonEditor(ctx: ExtensionContext, title: string, text: s
       render(width: number) {
         const count = words(editor.getExpandedText());
         return [
-          truncateToWidth(theme.fg("accent", title), width), ...editor.render(width),
+          truncateToWidth(theme.fg("accent", title), width),
+          ...visible(scope).split("\n").filter(Boolean).flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width))),
+          ...editor.render(width),
           truncateToWidth(theme.fg(count > maxWords ? "error" : "dim", `${count}/${maxWords} words · submit to review · ${keys.getKeys("tui.select.cancel").join("/")} cancel`), width),
         ].map((line) => truncateToWidth(line, width));
       },

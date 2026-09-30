@@ -45,6 +45,8 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
   let browseMenu = false;
   let browseRootSeen = false;
   let detailDone = false;
+  let browseStage = 0;
+  let priorityChosen = false;
   let menuClosed: (() => void) | undefined;
   let adding = false;
   let inputOpened: (() => void) | undefined;
@@ -55,6 +57,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     let value: string | undefined;
     if (event.method === "input" && adding) {
       assert.match(event.title!, /^Add lesson/);
+      assert.ok(event.title!.includes(`Project: ${project}`));
       staleInputId = event.id;
       inputOpened?.();
       return; // Leave this input pending, then abort it through /pi-mem reload.
@@ -75,15 +78,32 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
         value = "Browse / search lessons";
       } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
         if (detailDone) value = "Back";
-        else {
-          assert.ok(event.options?.some((option) => option.includes("A verified lesson from the RPC smoke test")));
+        else if (browseStage++ === 0) value = "Not recalled only";
+        else if (browseStage === 2) {
+          assert.match(event.title, /Filter: Not recalled[\s\S]*No lessons found/);
+          assert.ok(!event.options?.some((option) => option.includes("A verified lesson from the RPC smoke test")));
+          value = "Show all active lessons";
+        } else {
+          assert.ok(event.options?.some((option) => /^#\d+ · \[P5\]/.test(option) && option.includes("A verified lesson from the RPC smoke test")));
           value = event.options!.find((option) => option.includes("A verified lesson from the RPC smoke test"));
         }
       } else if (browseMenu && event.title?.startsWith("Lesson details")) {
         assert.match(event.title, /A verified lesson from the RPC smoke test/);
-        detailDone = true;
-        client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
-        return;
+        assert.ok(event.title!.includes(`Project: ${project}`));
+        assert.ok(event.options?.includes("Archive"));
+        assert.ok(!event.options?.includes("Delete (archive)"));
+        if (!priorityChosen) value = "Change priority…";
+        else {
+          assert.match(event.title, /Priority: 3/);
+          detailDone = true;
+          client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
+          return;
+        }
+      } else if (browseMenu && event.title?.startsWith("Lesson priority")) {
+        assert.ok(event.title.includes(`Project: ${project}`));
+        assert.match(event.title, /Current priority: 5/);
+        value = "3";
+        priorityChosen = true;
       } else {
         value = event.options![0];
       }
@@ -130,6 +150,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     browseMenu = false;
     const messagesAfterBrowse = await client.getMessages();
     assert.deepEqual(messagesAfterBrowse, messagesBeforeBrowse, "browsing must not add messages");
+    assert.equal(JSON.parse(await command(`/pi-mem get ${saved.id}`)).priority, 3);
     assert.equal(events.filter((event) => event.type === "agent_start").length, 0);
     assert.match(events.find((event) => event.title?.startsWith("Lesson details"))?.title ?? "", /A verified lesson from the RPC smoke test/);
 
