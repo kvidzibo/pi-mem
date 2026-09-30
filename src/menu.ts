@@ -37,6 +37,12 @@ const errorText = (error: unknown) => visible(clipped(error instanceof Error ? e
 /** Human-only navigation: no session messages or direct model calls. */
 export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | undefined> {
   const { signal } = access;
+  let browsingScope: string | undefined;
+  const viewState = (): MenuState => {
+    const state = access.current();
+    return browsingScope === undefined ? state : { ...state, scope: browsingScope };
+  };
+  const isCurrentProject = () => viewState().scope === access.current().scope;
   const choose = async (title: string, body: string, items: SelectItem[], selected?: string) => {
     access.check();
     const result = await menuChoice(ctx, title, body, items, signal, selected);
@@ -80,14 +86,14 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         editing = false;
         continue;
       }
-      const { store, scope } = access.current();
+      const { store, scope } = viewState();
       if (previous) {
         const replacement = store.supersede(scope, previous.id, input, access.origin);
-        access.saved([replacement.id]);
+        if (isCurrentProject()) access.saved([replacement.id]);
         ctx.ui.notify(`Lesson replaced: ${replacement.id}. Original retained.`, "info");
       } else {
         const result = store.add(scope, input, access.origin);
-        if (result.created) access.saved([result.lesson.id]);
+        if (result.created && isCurrentProject()) access.saved([result.lesson.id]);
         ctx.ui.notify(result.created ? `Lesson saved: ${result.lesson.id}` : `Already active: ${result.lesson.id}`, "info");
       }
       access.refresh();
@@ -98,7 +104,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
   async function activity(id: number) {
     let offset = 0;
     while (true) {
-      const { store, scope } = access.current();
+      const { store, scope } = viewState();
       const page = store.history(scope, id, offset, 20);
       const action = await choose(`History · #${id}`, "Retained changes only; browsing and recall are not logged.\nHistorical entries may have unknown attribution or dates.", [
         ...page.events.map((event) => item(String(event.id),
@@ -127,43 +133,44 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
   async function details(initialId: number) {
     const history = [initialId];
     while (history.length) {
-      const { store, scope, limits } = access.current();
+      const { store, scope, limits } = viewState();
       const lesson = store.get(scope, history.at(-1)!);
       const loaded = memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds.includes(lesson.id);
       const body = [
-        lesson.text, "", `Priority: ${lesson.priority}${lesson.priority === 0 ? " (user-reserved extreme)" : ""}`, `Evidence: ${lesson.evidence}`, "",
-        `State: ${lesson.archived ? "archived (not recalled)" : loaded ? "active · loaded into recall" : "active · omitted by recall limits"}`,
+        lesson.text, "", `Project: ${scope}`, `Priority: ${lesson.priority}${lesson.priority === 0 ? " (user-reserved extreme)" : ""}`, `Evidence: ${lesson.evidence}`, "",
+        `State: ${lesson.archived ? "archived (not recalled)" : !isCurrentProject() ? "active · other project (not recalled here)" : loaded ? "active · loaded into recall" : "active · omitted by recall limits"}`,
         `Created: ${new Date(lesson.created_at).toISOString()}`, `Basis: ${lesson.basis}`,
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
         `ID: #${lesson.id}`, `Predecessor: ${lesson.supersedes_id === null ? "(none)" : `#${lesson.supersedes_id}`}`,
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
           "Archived records are read-only except for project moves. No restore or delete."] : []),
       ].join("\n");
-      const action = await choose("Lesson details", body, [BACK, item("history", "History"), item("move", "Move lesson…"),
-        ...(!lesson.archived ? [item("replace", "Replace…"), item("priority", "Change priority…"), item("archive", "Archive…")] : []),
+      const action = await choose(lesson.archived ? "Lesson details" : "Lesson details · Set priority:", body, [
+        ...(!lesson.archived ? [item("archive", "Delete (archive)"),
+          ...Array.from({ length: 11 }, (_, priority) => item(`priority:${priority}`, `${priority}${priority === lesson.priority ? " — Current" : ""}`))] : []),
+        BACK, item("history", "History"), item("move", "Move lesson…"),
+        ...(!lesson.archived ? [item("replace", "Replace…")] : []),
         ...(lesson.supersedes_id ? [item("predecessor", "View predecessor")] : []),
-      ]);
+      ], lesson.archived ? "back" : `priority:${lesson.priority}`);
       if (!action || action === "back") { history.pop(); continue; }
       if (action === "predecessor") { history.push(lesson.supersedes_id!); continue; }
       if (action === "history") { await activity(lesson.id); continue; }
       if (action === "move") { if (await moveLesson(lesson)) return; }
       if (action === "replace") { if (await saveLesson(lesson)) return; }
-      if (action === "priority") {
-        const priority = await choosePriority(lesson.priority);
-        if (priority !== undefined) {
-          const current = access.current();
-          current.store.setPriority(current.scope, lesson.id, priority, access.origin);
-          access.refresh();
-          ctx.ui.notify(`Lesson #${lesson.id} priority: ${priority}. Content unchanged.`, "info");
-        }
+      if (action.startsWith("priority:")) {
+        const priority = Number(action.slice("priority:".length));
+        const current = viewState();
+        current.store.setPriority(current.scope, lesson.id, priority, access.origin);
+        access.refresh();
+        ctx.ui.notify(`Lesson #${lesson.id} priority: ${priority}. Content unchanged.`, "info");
       }
       if (action === "archive") {
         const confirmed = await choose("Archive lesson?", `${lesson.text}\n\nExclude this lesson from future recall; retain the record.\nThis cannot erase text already in a conversation. There is no restore operation.`,
           [CANCEL, item("archive", "Archive")]);
         if (confirmed !== "archive") continue;
-        const current = access.current();
+        const current = viewState();
         const result = current.store.archive(current.scope, lesson.id, access.origin);
-        if (result.changed) access.archived(result.lesson.id);
+        if (result.changed && isCurrentProject()) access.archived(result.lesson.id);
         ctx.ui.notify("Lesson archived; excluded from future recall. Record retained.", "info");
         access.refresh();
         return;
@@ -176,7 +183,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     let query = "";
     let selected: string | undefined;
     while (true) {
-      const { store, scope, limits } = access.current();
+      const { store, scope, limits } = viewState();
       let nextOffset: number | null = null;
       const listing = () => {
         let page = store.list(scope, { state: archived ? "archived" : "active", offset, limit: PAGE_SIZE, query: query || undefined });
@@ -187,11 +194,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         nextOffset = page.nextOffset;
         const loaded = new Set(memoryContext(store.recall(scope), limits.maxRecallBytes).loadedIds);
         const rows = page.lessons.map((lesson, index) => item(String(lesson.id),
-          `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
+          `${offset + index + 1}. [P${lesson.priority}] ${archived ? "[archived] " : !isCurrentProject() || loaded.has(lesson.id) ? "" : "[omitted] "}${clipped(lesson.text.replace(/\s+/gu, " "), 240)}`));
         const body = [
-          query ? `Search: ${query}` : "All lessons · priority first, then newest",
+          `Project: ${scope}`, query ? `Search: ${query}` : "All lessons · priority first, then newest",
           page.total ? `${offset + 1}–${offset + page.lessons.length} of ${page.total}` : "No lessons found.",
-          archived ? "Read-only retained records." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
+          archived ? "Read-only retained records." : !isCurrentProject() ? "Other project: these lessons are not recalled in this session." : "[omitted] marks lessons excluded by current recall limits; refreshed for each model request.",
         ].join("\n");
         return { body, items: [
           ...rows, ...(ctx.mode !== "tui" ? [item("search", "Search…"), ...(query ? [item("clear", "Clear search")] : [])] : []),
@@ -239,11 +246,30 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       [CANCEL, item("move", "Move lesson")]);
     if (confirmed !== "move") return false;
     if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
-    const current = access.current();
+    const current = viewState();
     const moved = current.store.moveLesson(current.scope, lesson.id, to, access.origin);
     access.refresh();
     ctx.ui.notify(`Moved lesson #${lesson.id} and linked history (${moved} records) to ${JSON.stringify(to)}.`, "info");
     return true;
+  }
+
+  async function browseProjects() {
+    while (true) {
+      const scopes = access.current().store.listScopes();
+      const selected = await choose("All projects", "Browse memories in this database, including archived-only and missing folders. Recall stays project-specific.",
+        [...scopes.map((scope, index) => item(String(index), scope)), BACK]);
+      if (selected === undefined || selected === "back") return;
+      const scope = scopes[Number(selected)];
+      if (!scope) continue;
+      browsingScope = scope;
+      try {
+        while (true) {
+          const action = await choose("Project memories", scope, [item("active", "Active lessons"), item("archived", "Archived lessons"), BACK]);
+          if (!action || action === "back") break;
+          await browse(action === "archived");
+        }
+      } finally { browsingScope = undefined; }
+    }
   }
 
   async function moveMemory() {
@@ -301,7 +327,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("move", "Move memory")] : []),
+        item("projects", "All projects"), item("move", "Move memory")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -311,6 +337,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       if (action === "status") await status();
       else if (action === "help") await choose("Memory help", access.help + "\n\nBrowsing stays in the UI; it does not add conversation messages.\nReplace and archive retain records. There is no restore or delete.", [BACK]);
       else if (action === "browse" || action === "archived") await browse(action === "archived");
+      else if (action === "projects") await browseProjects();
       else if (action === "add") await saveLesson();
       else if (action === "move") await moveMemory();
     } catch (error) { access.check(); reportError(error); }
