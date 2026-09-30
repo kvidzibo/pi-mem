@@ -17,17 +17,28 @@ export function projectScope(cwd: string): string {
     const scope = realpathSync(root);
     if (!isInside(scope, directory)) throw new Error("Git root does not contain the current directory");
     // Git lists the main worktree first, using the repository's shared metadata.
-    // Keep its existing path as the project key. Bare/separate Git directories
-    // use Git's reported main-worktree path (the shared metadata directory).
+    // Keep its existing path as the project key (the Git directory for bare repos).
     // NUL delimiters preserve paths containing newlines or Git quoting characters.
     const worktrees = execFileSync("git", ["-C", directory, "worktree", "list", "--porcelain", "-z"], {
       encoding: "utf8", timeout: 2000, env, stdio: ["ignore", "pipe", "pipe"],
     });
-    const first = worktrees.split("\0", 1)[0];
-    if (!first.startsWith("worktree ") || !isAbsolute(first.slice(9))) {
-      throw new Error("Cannot determine main Git worktree");
+    const records = worktrees.split("\0\0").filter(Boolean).map((record) => record.split("\0"));
+    const paths = records.map(([field]) => {
+      if (!field.startsWith("worktree ") || !isAbsolute(field.slice(9))) {
+        throw new Error("Cannot determine main Git worktree");
+      }
+      return field.slice(9);
+    });
+    if (!paths.some((path) => {
+      try { return realpathSync(path) === scope; } catch { return false; }
+    })) throw new Error("Current Git root is not a registered worktree");
+    const main = realpathSync(paths[0]);
+    // Separate Git directories have no main-checkout backlink. Do not guess a
+    // shared scope from an unregistered gitdir pointer, which could be planted.
+    if (!records[0].includes("bare") && !existsSync(join(main, ".git"))) {
+      throw new Error("Cannot identify the main checkout for a separate Git directory");
     }
-    return realpathSync(first.slice(9));
+    return main;
   } catch (error) {
     // Do not silently create a different bucket when a known repository is broken.
     for (let dir = directory; ; dir = dirname(dir)) {
