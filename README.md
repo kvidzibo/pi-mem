@@ -38,12 +38,12 @@ There are no agent read/search/history actions. An archived record cannot be sup
 Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mode:
 
 - Browse/search active or archived lessons, up to **1,000 items per page**; inspect evidence, origin, dates, IDs, and predecessor links. Active rows show whether recall loads or omits them.
-- **Global lessons** opens shared active/archived lessons, with add, replace, priority, archive, and history actions. These lessons are recalled in every project using this database; project move actions exclude them.
+- **Global lessons** opens shared active/archived lessons, with add, replace, priority, archive, and history actions. These lessons are recalled in every project using this database; whole-project moves exclude them.
 - **All projects** lists every stored project in the current database, including archived-only projects and missing folders. Select a project to browse and manage its lessons without switching cwd or recalling its memories here.
 - Select an active lesson to open **Set priority:** with **Delete (archive)** followed by priorities **0–10**. Priority changes apply immediately; Delete asks for confirmation and archives rather than erasing the record. History, replacement, and move actions remain available below.
 - Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Every change is recorded atomically in an append-only SQLite activity log. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Nothing saves until approval.
 - **History** in lesson details lists changes with timestamps, actor, provider/model, harness/session, reason when supplied, and relevant before/after values or replacement links. History follows project moves and stays out of automatic recall. Browsing, recall, failures, and no-ops are not logged. Model attribution comes from the assistant message issuing the tool call; missing attribution is marked unknown.
-- **Move lesson…** in lesson details moves only that lesson and its linked replacement history (including any successor), preserving IDs and metadata. Unrelated lessons stay put. Nonempty destinations are allowed; duplicate active text is refused atomically. Available for active and archived lessons; the destination must be an existing directory and resolves to its canonical main Git worktree root or cwd.
+- **Move lesson to project…** or **Move lesson to global…** in lesson details moves only that lesson and its linked replacement history (including any successor), preserving IDs and metadata. Unrelated lessons stay put. Nonempty destinations are allowed; duplicate active text is refused atomically. Available for active and archived lessons; a project destination must be an existing directory and resolves to its canonical main Git worktree root or cwd. Global destinations need no path and are recalled across all projects using the database.
 - **Move memory** lists all stored project paths, including archived-only projects and folders that no longer exist. Select a source, edit the destination (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical main Git worktree root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
 - Inspect read-only status and limits, reload memory, or open help. Initialization failures still allow status/help/reload.
 
@@ -65,7 +65,7 @@ Direct commands remain available; without UI, `/pi-mem` retains its text status 
 | `/pi-mem supersede <id> [--priority 0–10] <lesson>` | Replace and archive the original; inherit priority by default |
 | `/pi-mem priority <id> <0–10>` | Change active priority without replacing content |
 | `/pi-mem archive <id>` | Archive without deleting |
-| `/pi-mem move <id> <destination-path>` | Move lesson and linked history, preserving IDs; path may contain spaces, without quotes |
+| `/pi-mem move <id> <destination-path\|--global\|--project>` | Move lesson and linked history, preserving IDs; `--global` selects shared scope, `--project` selects the current project; paths may contain spaces, without quotes |
 | `/pi-mem list [offset]` | Page through active lessons |
 | `/pi-mem archived [offset]` | Page through archived records |
 | `/pi-mem search <text>` | Search active text/evidence by literal substring |

@@ -23,7 +23,7 @@ const HELP = [
   "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
   "/pi-mem history <id> [offset] — inspect retained activity and attribution",
-  "/pi-mem move <id> <destination-path> — move lesson and linked history; preserve IDs (path may contain spaces, no quotes)",
+  "/pi-mem move <id> <destination-path|--global|--project> — move lesson and linked history; --project means current project; preserve IDs",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -350,11 +350,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
           }
           show(page, ctx);
         } else if (command === "move") {
-          if (scope === GLOBAL_SCOPE) throw new Error("Global lessons cannot be moved with project commands");
           const [value, destination] = firstWord(rest);
-          if (!destination) throw new Error("Usage: /pi-mem move <id> <destination-path>");
+          if (!destination) throw new Error("Usage: /pi-mem move <id> <destination-path|--global|--project>");
           const id = parseLessonId(value);
-          const { scope: to } = moveDestination(ctx.cwd, destination);
+          const to = destination === "--global" ? GLOBAL_SCOPE
+            : destination === "--project" ? project : moveDestination(ctx.cwd, destination).scope;
           const moved = store.moveLesson(scope, id, to, source);
           show({ id, status: "moved", records: moved, from: scope, to }, ctx);
         } else if (command === "priority") {

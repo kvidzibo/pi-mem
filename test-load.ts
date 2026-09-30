@@ -538,7 +538,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     for (const choice of ["Cancel", "Move lesson"]) {
       steps.push({ title: "Memory ·", choice: "Archived lessons" },
         { title: "Archived lessons", search: "Move this", choice: "Move this lesson." },
-        { title: "Lesson details", choice: "Move lesson…" },
+        { title: "Lesson details", choice: "Move lesson to project…" },
         { title: "New cwd", text: destination },
         { title: "Move lesson?", choice, match: /entire linked replacement history, including any successor/ });
       if (choice === "Cancel") steps.push({ title: "Lesson details", choice: "Back" });
@@ -561,6 +561,46 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.match(notices.at(-1)!, /Usage: \/pi-mem move/);
     ctx.cwd = project;
 
+    // Scope moves preserve the whole chain, reject duplicates, and require menu approval.
+    ctx.cwd = spacedDestination;
+    for (const choice of ["Cancel", "Move lesson"]) {
+      steps.push({ title: "Memory ·", choice: "Archived lessons" },
+        { title: "Archived lessons", choice: moveFirst.text },
+        { title: "Lesson details", choice: "Move lesson to global…" },
+        { title: "Move lesson?", choice, match: /Global lessons are recalled in every project/ });
+      if (choice === "Cancel") steps.push({ title: "Lesson details", choice: "Back" });
+      steps.push({ title: "Archived lessons", choice: "Back" }, { title: "Memory ·" });
+      await run();
+      const expectedScope = choice === "Cancel" ? spacedDestination : GLOBAL_SCOPE;
+      assert.deepEqual(observer.get(expectedScope, moveLast.id), { ...moveLast, scope: expectedScope });
+      assert.equal(observer.get(expectedScope, moveFirst.id).archived, true);
+    }
+    steps.push({ title: "Memory ·", choice: "Global lessons" },
+      { title: "Global lessons", choice: "Active lessons" },
+      { title: "Browse / search", choice: moveLast.text },
+      { title: "Lesson details", choice: "Move lesson to project…" },
+      { title: "New cwd", text: spacedDestination },
+      { title: "Move lesson?", choice: "Move lesson" },
+      { title: "Browse / search", choice: "Back", match: /No lessons found/ },
+      { title: "Global lessons", choice: "Back" }, { title: "Memory ·" });
+    await run();
+    const duplicate = observer.add(GLOBAL_SCOPE,
+      { text: moveLast.text, evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    const historyBefore = observer.history(spacedDestination, moveLast.id);
+    await command.handler(`move ${moveFirst.id} --global`, ctx);
+    assert.match(notices.at(-1)!, /Duplicate active text/);
+    assert.deepEqual(observer.history(spacedDestination, moveLast.id), historyBefore);
+    assert.equal(observer.get(spacedDestination, moveFirst.id).archived, true);
+    observer.archive(GLOBAL_SCOPE, duplicate.id);
+    await command.handler(`move ${moveFirst.id} --global`, ctx);
+    assert.deepEqual(observer.get(GLOBAL_SCOPE, moveLast.id), { ...moveLast, scope: GLOBAL_SCOPE });
+    await command.handler(`move ${moveLast.id} --project`, ctx);
+    assert.deepEqual(observer.get(spacedDestination, moveLast.id), { ...moveLast, scope: spacedDestination });
+    assert.equal(observer.get(spacedDestination, moveFirst.id).archived, true);
+    assert.deepEqual(observer.history(spacedDestination, moveLast.id).events[0].details,
+      { before: GLOBAL_SCOPE, after: spacedDestination });
+    ctx.cwd = project;
+
     steps.push({ title: "Memory ·", choice: "Global lessons" },
       { title: "Global lessons", choice: "Add lesson" },
       { title: "Add lesson", text: "Check CLI dry runs." },
@@ -572,7 +612,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Browse / search", choice: "Back" },
       { title: "Global lessons", choice: "Back" }, { title: "Memory ·" });
     await run();
-    assert.equal(observer.list(GLOBAL_SCOPE, { state: "archived" }).total, 1);
+    assert.equal(observer.list(GLOBAL_SCOPE, { state: "archived" }).total, 2);
     assert.equal(observer.list(GLOBAL_SCOPE).total, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.

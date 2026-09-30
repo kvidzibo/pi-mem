@@ -147,19 +147,20 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
         `Origin: ${lesson.source_harness} · session ${lesson.source_session ?? "(none)"}`,
         `ID: #${lesson.id}`, `Predecessor: ${lesson.supersedes_id === null ? "(none)" : `#${lesson.supersedes_id}`}`,
         ...(lesson.archived ? [`Archived: ${lesson.archived_at === null ? "date unknown" : new Date(lesson.archived_at).toISOString()}`,
-          "Archived records are read-only except for project moves. No restore or delete."] : []),
+          "Archived records are read-only except for scope moves. No restore or delete."] : []),
       ].join("\n");
       const action = await choose(lesson.archived ? "Lesson details" : "Lesson details · Set priority:", body, [
         ...(!lesson.archived ? [item("archive", "Delete (archive)"),
           ...Array.from({ length: 11 }, (_, priority) => item(`priority:${priority}`, `${priority}${priority === lesson.priority ? " — Current" : ""}`))] : []),
-        BACK, item("history", "History"), ...(scope === GLOBAL_SCOPE ? [] : [item("move", "Move lesson…")]),
+        BACK, item("history", "History"), item("move", "Move lesson to project…"),
+        ...(scope === GLOBAL_SCOPE ? [] : [item("global", "Move lesson to global…")]),
         ...(!lesson.archived ? [item("replace", "Replace…")] : []),
         ...(lesson.supersedes_id ? [item("predecessor", "View predecessor")] : []),
       ], lesson.archived ? "back" : `priority:${lesson.priority}`);
       if (!action || action === "back") { history.pop(); continue; }
       if (action === "predecessor") { history.push(lesson.supersedes_id!); continue; }
       if (action === "history") { await activity(lesson.id); continue; }
-      if (action === "move") { if (await moveLesson(lesson)) return; }
+      if (action === "move" || action === "global") { if (await moveLesson(lesson, action === "global")) return; }
       if (action === "replace") { if (await saveLesson(lesson)) return; }
       if (action.startsWith("priority:")) {
         const priority = Number(action.slice("priority:".length));
@@ -240,16 +241,20 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     }
   }
 
-  async function moveLesson(lesson: Lesson): Promise<boolean> {
-    const entered = await destinationInput(ctx, ctx.cwd, signal);
-    access.check();
-    if (entered === undefined) return false;
-    const { path, scope: to } = moveDestination(ctx.cwd, entered);
-    if (lesson.scope === to) throw new Error("Source and destination are the same project");
-    const confirmed = await choose("Move lesson?", `#${lesson.id}: ${lesson.text}\n\nFrom: ${lesson.scope}\nTo: ${to}\n\nMove this lesson and its entire linked replacement history, including any successor. IDs and metadata stay unchanged.\nUnrelated lessons stay put. Duplicate active text is refused. No files move.`,
+  async function moveLesson(lesson: Lesson, global: boolean): Promise<boolean> {
+    let destination: ReturnType<typeof moveDestination> | undefined;
+    if (!global) {
+      const entered = await destinationInput(ctx, ctx.cwd, signal);
+      access.check();
+      if (entered === undefined) return false;
+      destination = moveDestination(ctx.cwd, entered);
+    }
+    const to = destination?.scope ?? GLOBAL_SCOPE;
+    if (lesson.scope === to) throw new Error("Source and destination scopes must differ");
+    const confirmed = await choose("Move lesson?", `#${lesson.id}: ${lesson.text}\n\nFrom: ${scopeLabel(lesson.scope)}\nTo: ${scopeLabel(to)}${global ? "\nGlobal lessons are recalled in every project using this database." : ""}\n\nMove this lesson and its entire linked replacement history, including any successor. IDs and metadata stay unchanged.\nUnrelated lessons stay put. Duplicate active text is refused. No files move.`,
       [CANCEL, item("move", "Move lesson")]);
     if (confirmed !== "move") return false;
-    if (!statSync(path).isDirectory() || projectScope(path) !== to) throw new Error("Destination changed; nothing moved");
+    if (destination && (!statSync(destination.path).isDirectory() || projectScope(destination.path) !== to)) throw new Error("Destination changed; nothing moved");
     const current = viewState();
     const moved = current.store.moveLesson(current.scope, lesson.id, to, access.origin);
     access.refresh();
