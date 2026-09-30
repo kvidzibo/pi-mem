@@ -3,8 +3,8 @@ import { stripVTControlCharacters } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
@@ -314,7 +314,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   mkdirSync(project);
   const notices: string[] = [];
   const messages: Array<{ content: string }> = [];
-  type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; before?: () => void | Promise<void> };
+  type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; absent?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
   let extension: Awaited<ReturnType<typeof load>>;
@@ -346,15 +346,19 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
             if (step.beforeSearch) assert.match(screen(), step.beforeSearch);
             component.focused = true;
             for (const char of step.search) component.handleInput(char);
-            assert.match(screen(), /1–1 of 1/);
+            const projectSearch = step.title === "All projects" || step.title === "Move to project";
+            const found = projectSearch ? /1 project/ : /1–1 of 1/;
+            assert.match(screen(), found);
             component.handleInput("!");
-            assert.match(screen(), /No lessons found/);
+            assert.match(screen(), projectSearch ? /No projects found/ : /No lessons found/);
+            if (projectSearch) assert.match(screen(), /^→ Back$/m);
             component.handleInput("\x7f");
-            assert.match(screen(), /1–1 of 1/);
+            assert.match(screen(), found);
           }
           for (let count = 0; count < (step.backspaces ?? 0); count++) component.handleInput("\x7f");
           if (step.title === "Archived lessons" || step.title.startsWith("Browse / search")) assert.doesNotMatch(screen(), /Clear search/);
           if (step.match) assert.match(screen(), step.match);
+          if (step.absent) assert.doesNotMatch(screen(), step.absent);
           if (step.text !== undefined) {
             component.focused = true;
             component.handleInput("\x01"); // Start of prefilled lesson.
@@ -372,7 +376,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           if (step.choice) {
             for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && (/^\d+$/.test(step.choice!) ? line.slice(2).split(" —")[0].trim() === step.choice : line.includes(step.choice!))); count++) {
               assert.ok(count < 1020, `choice ${step.choice} not found: ${screen()}`);
-              component.handleInput("\x1b[B");
+              component.handleInput(["Not recalled only", "Show all active lessons", "Next page", "Previous page", "Back"].includes(step.choice!) ? "\x1b[A" : "\x1b[B");
             }
           }
           await step.before?.();
@@ -404,20 +408,25 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     };
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
+      { title: "Browse / search", choice: "Not recalled only", match: /lesson-count limit reached \(1 lesson\)/ },
+      { title: "Browse / search", choice: "Next page", match: /Filter: Not recalled[\s\S]*1–1000 of 1001/ },
+      { title: "Browse / search", choice: "Show all active lessons", match: /1001–1001 of 1001/ },
       { title: "Browse / search", choice: "Next page", match: /1–1000 of 1002/ },
-      { title: "Browse / search", search: "Seed 0.", beforeSearch: /1001–1002 of 1002[\s\S]*\[omitted\]/, choice: "Seed 0.", match: /Search: Seed 0\.[\s\S]*\[omitted\]/ },
+      { title: "Browse / search", search: "Seed 0.", beforeSearch: /1001–1002 of 1002[\s\S]*\[omitted\]/, choice: "Not recalled only", match: /Search: Seed 0\.[\s\S]*\[omitted\]/ },
+      { title: "Browse / search", choice: "Seed 0.", match: new RegExp(`Search: Seed 0\\.[\\s\\S]*Filter: Not recalled[\\s\\S]*#${original.id} · \\[P5\\] \\[omitted\\]`) },
       { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
-      { title: "Replace lesson", text: "Seed 0. Corrected.", match: /2\/5 words/ },
-      { title: "Review replacement", choice: "Cancel", match: /BEFORE\nSeed 0\.\n\nAFTER\nSeed 0\. Corrected\./ },
+      { title: "Replace lesson", text: "Seed 0. Corrected.", match: /Project: .*project[\s\S]*2\/5 words/ },
+      { title: "Review replacement", choice: "Cancel", match: /Project: .*project[\s\S]*BEFORE\nSeed 0\.\n\nAFTER\nSeed 0\. Corrected\./ },
       { title: "Lesson details", choice: "Replace…", before: () => { assert.equal(observer!.get(project, original.id).archived, false); } },
       { title: "Replace lesson", text: "Seed 0. Corrected." },
       { title: "Review replacement", choice: "Save" },
+      { title: "Browse / search", choice: "Show all active lessons", match: /Search: Seed 0\.[\s\S]*Filter: Not recalled[\s\S]*No lessons found/ },
       { title: "Browse / search", choice: "Seed 0. Corrected.", match: /Search: Seed 0\./ },
       { title: "Lesson details", choice: "View predecessor", match: new RegExp(`Predecessor: #${original.id}`) },
       { title: "Lesson details", choice: "Back", match: /Archived records are read-only/ },
-      { title: "Lesson details", choice: "Delete (archive)" },
+      { title: "Lesson details", choice: "Archive" },
       { title: "Archive lesson?", choice: "Cancel", match: /future recall[\s\S]*already in a conversation/ },
-      { title: "Lesson details", choice: "Delete (archive)" },
+      { title: "Lesson details", choice: "Archive" },
       { title: "Archive lesson?", choice: "Archive" },
       { title: "Browse / search", choice: "Back", match: /No lessons found/ },
       { title: "Memory ·", choice: "Add lesson" },
@@ -428,10 +437,11 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Review new lesson", choice: "Save", match: /Priority: 0/ },
       { title: "Memory ·", choice: "Browse / search lessons" },
       { title: "Browse / search", choice: "New menu lesson.", match: /\[P0\]/ },
-      { title: "Lesson details", choice: "5", match: /Priority: 0/ },
+      { title: "Lesson details", choice: "Change priority…", match: /Priority: 0/ },
+      { title: "Lesson priority", choice: "5" },
       { title: "Lesson details", choice: "History", match: /Priority: 5/ },
-      { title: "History ·", choice: "priority", match: /Retained changes only/ },
-      { title: "Activity ·", choice: "Back", match: /Actor: user[\s\S]*Session: menu-session/ },
+      { title: "History ·", choice: "Priority changed", match: /Retained changes only/ },
+      { title: "Activity ·", choice: "Back", match: /Priority changed: 0 → 5[\s\S]*Actor: user[\s\S]*Session: menu-session/ },
       { title: "History ·", choice: "Back" },
       { title: "Lesson details", choice: "Back", match: /Priority: 5/ },
       { title: "Browse / search", choice: "Back" },
@@ -456,24 +466,26 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.deepEqual(saveCards.map((entry) => (entry.data as Array<{ text: string }>)[0].text), ["Seed 0. Corrected.", "New menu lesson."]);
 
     // Cross-project actions target the selected scope without polluting this session's archive cards.
-    const foreignScope = join(directory, "foreign-missing-project");
+    const foreignScope = join(homedir(), `foreign-missing-project-${basename(directory)}`);
+    assert.equal(existsSync(foreignScope), false); // Stored scope only: no directory is created outside the fixture.
     const foreign = observer.add(foreignScope, { text: "Foreign project lesson.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
     const archiveCardsBefore = ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length;
     steps.push(
       { title: "Memory ·", choice: "All projects" },
-      { title: "All projects", choice: foreignScope },
+      { title: "All projects", search: "~/foreign-missing-project-", choice: basename(foreignScope), match: /1 active \/ 0 archived/ },
       { title: "Project memories", choice: "Active lessons" },
       { title: "Browse / search", choice: foreign.text, match: /Other project/ },
-      { title: "Lesson details", choice: "0", match: /other project \(not recalled here\)/ },
-      { title: "Lesson details", choice: "Delete (archive)", match: /Priority: 0/ },
+      { title: "Lesson details", choice: "Change priority…", match: /other project \(not recalled here\)/ },
+      { title: "Lesson priority", choice: "0 — Extreme", match: new RegExp(foreignScope) },
+      { title: "Lesson details", choice: "Archive", match: /Priority: 0/ },
       { title: "Archive lesson?", choice: "Cancel" },
-      { title: "Lesson details", choice: "Delete (archive)" },
+      { title: "Lesson details", choice: "Archive" },
       { title: "Archive lesson?", choice: "Archive" },
       { title: "Browse / search", choice: "Back", match: /No lessons found/ },
       { title: "Project memories", choice: "Archived lessons" },
       { title: "Archived lessons", choice: foreign.text },
       { title: "Lesson details", choice: "History", match: /archived \(not recalled\)/ },
-      { title: "History ·", choice: "Back", match: /archive[\s\S]*priority/ },
+      { title: "History ·", choice: "Back", match: /Lesson archived[\s\S]*Priority changed/ },
       { title: "Lesson details", choice: "Back" },
       { title: "Archived lessons", choice: "Back" },
       { title: "Project memories", choice: "Back" },
@@ -494,6 +506,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     for (const choice of ["Cancel", "Move memory"]) {
       steps.push({ title: "Memory ·", choice: "Move memory" },
         { title: "Move memory — select stored cwd", choice: oldScope },
+        { title: "Move to project", choice: "Enter path…" },
         { title: "New cwd", match: new RegExp(project), text: destination },
         { title: "Move memory?", choice, match: /Move all 1 lessons/ },
         { title: "Memory ·" });
@@ -508,10 +521,11 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await command.handler("reload", ctx);
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
+      { title: "Browse / search", choice: "Not recalled only", match: /byte budget reached[\s\S]*\[P5\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
       { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
-        match: /\[P5\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
-      { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits/ },
-      { title: "Browse / search", choice: "Back" },
+        match: /Filter: Not recalled[\s\S]*1–1000 of 1001/ },
+      { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits: byte budget reached/ },
+      { title: "Browse / search", choice: "Back", match: /Filter: Not recalled/ },
       { title: "Memory ·" },
     );
     await run();
@@ -539,7 +553,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       steps.push({ title: "Memory ·", choice: "Archived lessons" },
         { title: "Archived lessons", search: "Move this", choice: "Move this lesson." },
         { title: "Lesson details", choice: "Move lesson to project…" },
-        { title: "New cwd", text: destination },
+        { title: "Move to project", choice: destination, match: /0 active \/ 1 archived/, absent: /foreign-missing-project/ },
         { title: "Move lesson?", choice, match: /entire linked replacement history, including any successor/ });
       if (choice === "Cancel") steps.push({ title: "Lesson details", choice: "Back" });
       steps.push({ title: "Archived lessons", choice: "Back" }, { title: "Memory ·" });
@@ -579,6 +593,9 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Global lessons", choice: "Active lessons" },
       { title: "Browse / search", choice: moveLast.text },
       { title: "Lesson details", choice: "Move lesson to project…" },
+      { title: "Move to project", search: "single lesson destination", choice: "Enter path…" },
+      { title: "New cwd" },
+      { title: "Move to project", choice: "Enter path…", match: /Search: single lesson destination/ },
       { title: "New cwd", text: spacedDestination },
       { title: "Move lesson?", choice: "Move lesson" },
       { title: "Browse / search", choice: "Back", match: /No lessons found/ },
@@ -603,11 +620,11 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
 
     steps.push({ title: "Memory ·", choice: "Global lessons" },
       { title: "Global lessons", choice: "Add lesson" },
-      { title: "Add lesson", text: "Check CLI dry runs." },
-      { title: "Review new lesson", choice: "Save", match: /global lesson for recall in every project/ },
+      { title: "Add lesson", text: "Check CLI dry runs.", match: /Add lesson\nGlobal/ },
+      { title: "Review new lesson", choice: "Save", match: /Review new lesson\nGlobal[\s\S]*global lesson for recall in every project/ },
       { title: "Global lessons", choice: "Active lessons" },
       { title: "Browse / search", choice: "Check CLI dry runs.", match: /Global/ },
-      { title: "Lesson details", choice: "Delete (archive)", match: /Global[\s\S]*active · loaded into recall/ },
+      { title: "Lesson details", choice: "Archive", match: /Global[\s\S]*active · loaded into recall/ },
       { title: "Archive lesson?", choice: "Archive" },
       { title: "Browse / search", choice: "Back" },
       { title: "Global lessons", choice: "Back" }, { title: "Memory ·" });

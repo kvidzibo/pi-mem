@@ -444,7 +444,7 @@ export class MemoryStore {
     return lesson(row);
   }
 
-  list(scope: string, options: { query?: string; state?: State; offset?: number; limit?: number } = {}): Page {
+  list(scope: string, options: { query?: string; state?: State; offset?: number; limit?: number; excludeIds?: readonly number[] } = {}): Page {
     this.checkScope(scope);
     const { state = "active", offset = 0, limit = 30 } = options;
     if (!["active", "archived", "all"].includes(state)) throw new Error("Invalid lesson state");
@@ -452,8 +452,11 @@ export class MemoryStore {
       throw new Error("offset must be nonnegative; limit must be between 1 and 1000");
     }
     const query = options.query === undefined ? "" : checkedText(options.query, "query", 200);
-    const where = `scope = ? AND (? = 'all' OR archived = ?) AND instr(lower(text || char(10) || evidence), lower(?)) > 0`;
-    const params = [scope, state, state === "archived" ? 1 : 0, query];
+    const excluded = options.excludeIds ?? [];
+    if (excluded.some((id) => !Number.isSafeInteger(id) || id < 1)) throw new Error("excludeIds must contain positive safe integers");
+    const where = `scope = ? AND (? = 'all' OR archived = ?) AND instr(lower(text || char(10) || evidence), lower(?)) > 0
+      ${excluded.length ? "AND id NOT IN (SELECT value FROM json_each(?))" : ""}`;
+    const params = [scope, state, state === "archived" ? 1 : 0, query, ...(excluded.length ? [JSON.stringify(excluded)] : [])];
     const total = Number(this.db.prepare(`SELECT count(*) AS n FROM lessons WHERE ${where}`).get(...params)!.n);
     const lessons = this.db.prepare(`SELECT * FROM lessons WHERE ${where} ORDER BY priority, created_at DESC, id LIMIT ? OFFSET ?`)
       .all(...params, limit, offset).map(lesson);
