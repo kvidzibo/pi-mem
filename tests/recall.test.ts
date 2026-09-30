@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { databasePath, memoryConfig } from "../src/config.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
 import { runMemory } from "../src/operations.ts";
-import { boundedPage, formatTokens, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
+import { boundedPage, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES } from "../src/presentation.ts";
 import { MemoryStore } from "../src/store.ts";
 
 test("footer token units match Pi's compact k/M thresholds", () => {
@@ -136,6 +136,29 @@ test("recall byte budgets bound UTF-8 context without changing stored lessons", 
   for (const maxRecallBytes of [0, 63, 64.5, Number.MAX_SAFE_INTEGER + 1, "8192", null, true]) {
     writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallBytes }));
     assert.throws(() => memoryConfig(dir, {}), /maxRecallBytes.*64/);
+  }
+});
+
+test("global recall uses the configured byte budget above and below 4 KiB", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-mem-global-bytes-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const db = new MemoryStore(join(dir, "db.sqlite3"), { ...DEFAULT_LIMITS, maxRecallLessons: 100 });
+  t.after(() => db.close());
+  db.addMany("global", Array.from({ length: 100 }, (_, i) => ({
+    text: `Lesson ${i}: ${"多".repeat(35)} — keep this representative short lesson.`,
+    evidence: "Verified.", basis: "user_request" as const,
+  })), { harness: "test", session: null });
+  for (const maxRecallBytes of [1024, 8192, 32768]) {
+    writeFileSync(join(dir, "pi-mem.json"), JSON.stringify({ maxRecallBytes }));
+    const config = memoryConfig(dir, {});
+    const budget = globalRecallBytes(config.maxRecallBytes);
+    assert.equal(budget, maxRecallBytes);
+    const rendered = memoryContext(db.recall("global"), budget, "GLOBAL LESSONS");
+    assert.ok(Buffer.byteLength(rendered.text) <= maxRecallBytes);
+    assert.match(rendered.text, /^GLOBAL LESSONS/);
+    if (maxRecallBytes > 4096) assert.ok(Buffer.byteLength(rendered.text) > 4096);
+    if (maxRecallBytes === 32768) assert.equal(rendered.loaded, 100);
+    else assert.match(rendered.text, /lessons omitted/);
   }
 });
 
