@@ -27,7 +27,7 @@ async function load() {
   return { ...result.extensions[0], runtime: result.runtime, sessionLog };
 }
 
-test("real Pi loader: immediate persistence, bounded replaceable recall, lifecycle, commands and failures", async () => {
+test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle, commands and failures", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-mem-load-"));
   const previous = { PI_MEMORY_DB: process.env.PI_MEMORY_DB, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
   process.env.PI_CODING_AGENT_DIR = directory;
@@ -68,7 +68,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.deepEqual([...extension.commands.keys()], ["pi-mem"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
-    const emptyRecall = await event("context", { messages: [] });
+    const emptyRecall = await event("context", { messages: [{ role: "user", content: "Initial check", timestamp: 0 }] });
     expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
@@ -129,9 +129,11 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     recall = await event("context", recall);
     assert.equal(recall.messages.length, 2, "repeated requests must not accumulate memory blocks");
     inspection.archive(ctx.cwd, saved.id);
+    const cachedRecall = structuredClone(recall.messages);
     recall = await event("context", { messages: [user] });
-    assert.doesNotMatch(recall.messages[0].content, /Test startup recall/);
-    expectStatus(1, 1, recall.messages[0].content, 2); // External archives must not count as this session's actions.
+    assert.deepEqual(recall.messages.slice(0, cachedRecall.length), cachedRecall);
+    assert.match(recall.messages.at(-1).content, new RegExp(`No longer recalled; disregard earlier recalled versions: #${saved.id}\\.`));
+    expectStatus(1, 1, memoryContext(inspection.recall(ctx.cwd)).text, 2); // External archives must not count as this session's actions.
     for (const action of ["get", "list", "search", "history", "update", "restore"]) {
       await assert.rejects(execute({ ...input, action, id: saved.id, query: "startup" }), /Unknown memory action/);
     }
@@ -242,6 +244,7 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     assert.match(notices.at(-1)!, /text exceeds 3 words/);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
+    await event("session_compact");
     const sqliteRecall = (await event("context", { messages: [user] })).messages[0].content;
     assert.match(sqliteRecall, /^PROJECT LESSONS\nPriority: .*\nPriority guides .*\n- \[P5\] /);
     assert.match(sqliteRecall, /\n\[1 lessons omitted\.\]$/);
@@ -249,12 +252,14 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
     expectStatus(1, 2, sqliteRecall, 2); // Omitted lessons do not inflate token counts.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: Buffer.byteLength(sqliteRecall) }));
     await command.handler("reload", ctx);
+    await event("session_compact");
     const byteLimitedRecall = (await event("context", { messages: [user] })).messages[0].content;
     assert.equal(byteLimitedRecall, sqliteRecall, "the byte budget must apply even without a one-lesson count limit");
     assert.ok(Buffer.byteLength(byteLimitedRecall) <= Buffer.byteLength(sqliteRecall));
     expectStatus(1, 2, byteLimitedRecall, 2);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxEvidenceWords: 1 }));
     await command.handler("reload", ctx);
+    await event("session_compact");
     const restoredRecall = (await event("context", { messages: [user] })).messages[0].content;
     assert.doesNotMatch(restoredRecall, /lessons omitted/);
     expectStatus(2, 2, restoredRecall, 2);
@@ -295,6 +300,100 @@ test("real Pi loader: immediate persistence, bounded replaceable recall, lifecyc
   } finally {
     await event("session_shutdown", { reason: "quit" });
     inspection?.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real Pi loader: lesson changes append deltas without rewriting earlier request prefixes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-mem-cache-"));
+  const previous = { PI_MEMORY_DB: process.env.PI_MEMORY_DB, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+  process.env.PI_CODING_AGENT_DIR = directory;
+  process.env.PI_MEMORY_DB = join(directory, "db.sqlite3");
+  const extension = await load();
+  const ctx = { cwd: directory, hasUI: false, sessionManager: {
+    getSessionId: () => "cache-session", getEntries: () => [], getBranch: () => [],
+  } };
+  const event = async (name: string, value: object = {}) => {
+    let result;
+    for (const handler of extension.handlers.get(name) ?? []) result = await handler(value, ctx);
+    return result;
+  };
+  const db = new MemoryStore(process.env.PI_MEMORY_DB);
+  const source = { harness: "test", session: "external" };
+  const add = (text: string, scope = directory) => db.add(scope, { text, evidence: "Verified.", basis: "user_request" }, source).lesson;
+  const user = (text: string, timestamp: number) => ({ role: "user", content: text, timestamp });
+  try {
+    const original = add("Original project lesson.");
+    const global = add("Global lesson.", GLOBAL_SCOPE);
+    await event("session_start");
+    let raw = [user("Start", 1)];
+    let request = (await event("context", { messages: raw })).messages;
+    assert.match(request[0].content, /GLOBAL LESSONS[\s\S]*Global lesson[\s\S]*PROJECT LESSONS[\s\S]*Original project/);
+    const baseline = structuredClone(request[0]);
+    const next = async (pattern: RegExp) => {
+      const before = structuredClone(request);
+      raw.push(user(`Continue ${raw.length}`, raw.length + 1));
+      request = (await event("context", { messages: structuredClone(raw) })).messages;
+      assert.deepEqual(request.slice(0, before.length), before, "the entire previous request must remain byte-for-byte unchanged");
+      assert.match(request.at(-1).content, pattern);
+      assert.deepEqual(request[0], baseline);
+      assert.deepEqual((await event("context", { messages: structuredClone(raw) })).messages, request, "retries must not duplicate deltas");
+      assert.deepEqual((await event("context", { messages: structuredClone(request) })).messages, request, "already-transformed input must be idempotent");
+    };
+    const added = add("New project lesson.");
+    await next(/MEMORY UPDATE[\s\S]*New project lesson/);
+    assert.doesNotMatch(request.at(-1).content, /Original project lesson|Global lesson\./, "unchanged lesson text must not be repeated");
+    db.setPriority(directory, original.id, 2, source);
+    await next(new RegExp(`\\[P2\\] Original project lesson\\. #${original.id}`));
+    db.archive(GLOBAL_SCOPE, global.id);
+    await next(new RegExp(`No longer recalled; disregard earlier recalled versions: #${global.id}`));
+    const replacement = db.supersede(directory, added.id, { text: "Replacement lesson.", evidence: "Verified.", basis: "user_request" }, source);
+    await next(new RegExp(`No longer recalled[^\\n]*#${added.id}[\\s\\S]*Replacement lesson\\. #${replacement.id}`));
+    db.moveLesson(directory, original.id, GLOBAL_SCOPE, source);
+    await next(/GLOBAL LESSONS\n- \[P2\] Original project lesson/);
+
+    // Reloading limits keeps the baseline, but withdraws IDs displaced by the new selection.
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ maxRecallBytes: 64 }));
+    extension.runtime.sendMessage = () => {};
+    await extension.commands.get("pi-mem").handler("reload", ctx);
+    await next(/No longer recalled[\s\S]*Current recall status:[\s\S]*lessons omitted/);
+    assert.doesNotMatch(request.at(-1).content, /- \[P/);
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ maxRecallBytes: 0 }));
+    await assert.rejects(extension.commands.get("pi-mem").handler("reload", ctx), /maxRecallBytes/);
+    await next(/Project memory unavailable/);
+    writeFileSync(join(directory, "pi-mem.json"), "{}");
+    await extension.commands.get("pi-mem").handler("reload", ctx);
+    await next(/Original project lesson[\s\S]*Replacement lesson[\s\S]*memory available/);
+
+    // No append-only history exists across compaction, branch edits, or session replacement.
+    await event("session_compact");
+    raw = [user("Compacted summary", 100)];
+    request = (await event("context", { messages: raw })).messages;
+    assert.equal(request.length, 2);
+    assert.match(request[0].content, /Replacement lesson/);
+    assert.doesNotMatch(request[0].content, /New project lesson|Global lesson\.|MEMORY UPDATE/);
+    add("After compaction.");
+    const before = structuredClone(request);
+    request = (await event("context", { messages: raw })).messages;
+    assert.deepEqual(request.slice(0, before.length), before, "changes on an identical raw context append too");
+    assert.match(request.at(-1).content, /After compaction/);
+    const branch = (await event("context", { messages: [user("Different branch", 100)] })).messages;
+    assert.equal(branch.length, 2);
+    assert.match(branch[0].content, /After compaction/);
+    await event("session_tree");
+    assert.equal((await event("context", { messages: raw })).messages.length, 2);
+    await event("session_start");
+    assert.equal((await event("context", { messages: raw })).messages.length, 2);
+    const empty = (await event("context", { messages: [] })).messages;
+    assert.equal(empty.length, 1);
+    assert.deepEqual((await event("context", { messages: [] })).messages, empty);
+    assert.deepEqual(extension.sessionLog.getEntries(), [], "recall overlays must not persist or trigger turns");
+  } finally {
+    await event("session_shutdown");
+    db.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
