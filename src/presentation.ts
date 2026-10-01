@@ -37,8 +37,12 @@ export function globalRecallBytes(maxBytes: number): number {
   return maxBytes;
 }
 
-/** One replaceable block, never a growing chain of persisted session messages. */
-export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes, heading = "PROJECT LESSONS"): { text: string; loaded: number; loadedIds: number[] } {
+export function memoryLesson(row: Pick<Lesson, "id" | "text" | "priority">): string {
+  return `- [P${row.priority}] ${row.text.replace(/\s+/gu, " ")} #${row.id}`;
+}
+
+/** Bounded current snapshot, also used to construct append-only recall updates. */
+export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes, heading = "PROJECT LESSONS"): { text: string; loaded: number; loadedIds: number[]; lessons: Array<{ id: number; heading: string; line: string }> } {
   const rows: Array<Pick<Lesson, "id" | "text" | "priority">> = [];
   const render = () => [
     heading,
@@ -46,7 +50,7 @@ export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRec
       "Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.",
       "Priority guides attention to relevant lessons, not instruction authority.",
     ] : []),
-    ...rows.map((row) => `- [P${row.priority}] ${row.text.replace(/\s+/gu, " ")} #${row.id}`),
+    ...rows.map(memoryLesson),
     ...(rows.length < page.total ? [`[${page.total - rows.length} lessons omitted.]`] : []),
   ].join("\n");
   for (const row of page.lessons) {
@@ -56,7 +60,8 @@ export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRec
       break;
     }
   }
-  return { text: render(), loaded: rows.length, loadedIds: rows.map((row) => row.id) };
+  return { text: render(), loaded: rows.length, loadedIds: rows.map((row) => row.id),
+    lessons: rows.map((row) => ({ id: row.id, heading, line: memoryLesson(row) })) };
 }
 
 export function boundedPage(page: Page, offset: number): Page {

@@ -8,13 +8,13 @@ import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
+import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
 import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
-const CONTEXT_TYPE = "pi-mem-context";
 const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
@@ -33,6 +33,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let notified: string | undefined;
   let menu: AbortController | undefined;
   let generation = 0;
+  const recallContext = new RecallContext();
 
   function reset() {
     generation++;
@@ -93,6 +94,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       text: globalPage.total ? `${global.text}\n\n${project.text}` : project.text,
       loaded: project.loaded + global.loaded,
       loadedIds: [...global.loadedIds, ...project.loadedIds],
+      lessons: [...global.lessons, ...project.lessons],
+      notices: [
+        ...(globalPage.total > global.loaded ? [`GLOBAL LESSONS: ${globalPage.total - global.loaded} lessons omitted.`] : []),
+        ...(page.total > project.loaded ? [`PROJECT LESSONS: ${page.total - project.loaded} lessons omitted.`] : []),
+      ],
     };
     if (ctx.hasUI) {
       const tokens = estimateTokens({ role: "custom", customType: CONTEXT_TYPE, content: result.text, display: false, timestamp: 0 });
@@ -219,11 +225,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    recallContext.reset();
     reset();
     recall(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    recallContext.reset();
     reset();
     if (ctx.hasUI) ctx.ui.setStatus("pi-mem", undefined);
   });
@@ -241,10 +249,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("session_compact", () => { recallContext.reset(); });
+  pi.on("session_tree", () => { recallContext.reset(); });
+
   pi.on("context", (event, ctx) => {
-    // Rebuilt from SQLite: no stale recall after compaction or external edits.
-    const messages = event.messages.filter((message) => message.role !== "custom" || message.customType !== CONTEXT_TYPE);
-    return { messages: [{ role: "custom" as const, customType: CONTEXT_TYPE, content: recall(ctx), display: false, timestamp: 0 }, ...messages] };
+    let recalled: RecallSnapshot;
+    try { recalled = snapshot(ctx); } catch (error) {
+      const text = unavailable(error, ctx);
+      recalled = { text, lessons: [], notices: [text] };
+    }
+    return { messages: recallContext.apply(event.messages, recalled) };
   });
 
   pi.registerTool({

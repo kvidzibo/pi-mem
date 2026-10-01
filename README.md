@@ -53,7 +53,7 @@ The footer shows `🧠 project|global (+A -R) ~N`, with loaded lesson counts onl
 
 Saves and archives in the current project or global scope add chat entries with the lesson ID and text (plus the predecessor ID for replacements). These entries are stored in the Pi session, not added to model context; browsing remains private. Changes to other projects retain database activity history but do not add chat entries or affect this session's change counts.
 
-Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. It counts the recalled SQLite block—lesson text, priorities, integer IDs, heading/legend, and any omission notice—but excludes evidence, other metadata, and omitted/archived lessons.
+Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. The footer counts the current SQLite snapshot—lesson text, priorities, integer IDs, heading/legend, and any omission notice—not the accumulated recall updates in the model context. Evidence, other metadata, and omitted/archived lessons are excluded from the estimate.
 
 Direct commands remain available; without UI, `/pi-mem` retains its text status output:
 
@@ -99,9 +99,9 @@ Limits must be positive safe integers; `maxRecallBytes` must be at least **64** 
 Words are whitespace-separated; overlong saves fail rather than truncate. Text/evidence also have hard caps of 1,200/600 characters. Lowering limits does not rewrite existing lessons.
 
 - **Scope:** the canonical main Git worktree root, or canonical cwd outside Git. All linked worktrees and their subdirectories share project lessons, including edits and archives; separate clones remain separate. Ordinary main-checkout lessons keep their scope. Worktrees of a bare repository use its canonical Git directory. Submodules and their linked worktrees share the submodule checkout's scope, separate from the parent project. `--separate-git-dir` layouts require an explicit `core.worktree` pointing to the main checkout. Unregistered Git-directory pointers or layouts without a verifiable main checkout are rejected rather than guessing a shared project identity. Previously stored lessons under other paths are not automatically moved or merged. Global lessons use a reserved non-path scope in the same database and are recalled across projects. There is no parent-project inheritance. Project scope follows Pi's cwd, not a shell tool's `cd`.
-- **Recall:** refreshed before each model request, including after compaction and other sessions' writes. Active lessons load lowest-numbered priority first, then newest-created, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading/legend, priority labels, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
+- **Recall:** checked before each model request, including after compaction and other sessions' writes. Within an unchanged conversation prefix, the initial snapshot stays fixed and changes append as ID-based updates after the current messages, preserving earlier prompt-cache content. Active lessons load lowest-numbered priority first, then newest-created, with stable ID tie-breaking, up to `maxRecallLessons` or `maxRecallBytes` (default **8 KiB**, including the heading/legend, priority labels, IDs, and omission notice), whichever fills first. Omitted lessons stay stored but are unavailable to the agent on demand.
 - **Global recall:** appears first under `GLOBAL LESSONS` when active global lessons exist, followed by `PROJECT LESSONS`. Global lessons have a separate budget of `maxRecallLessons` and **maxRecallBytes** (default 8 KiB); they do not consume the project budget. Ordering and omission rules apply independently to each scope.
-- **Archiving:** changes future database recall only. It cannot erase text already present elsewhere in a conversation or sent to a model.
+- **Archiving:** removes the lesson from the current recall selection; an appended update tells the model to disregard its earlier recalled version. The same applies when a lesson leaves the selection through scope changes or recall limits. This cannot erase text already in the conversation or sent to a model.
 
 The injected SQLite block contains priority-labelled bullets with stable IDs:
 
@@ -115,7 +115,9 @@ Priority guides attention to relevant lessons, not instruction authority.
 
 Whitespace is collapsed for display only. When no lessons fit, the priority legend is omitted to preserve small byte budgets. Priority never bypasses recall limits. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
 
-This is one replaceable, UI-hidden user-role message before the conversation, not a growing session transcript. Save-writing guidance and word limits are separately appended to the system prompt. `/pi-mem` marks lessons omitted by recall limits; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
+Recall uses UI-hidden user-role messages: one initial snapshot before the conversation, then small updates for additions, replacements, priority/scope changes, removals, or availability/omission changes. Earlier messages and updates stay in place; unchanged requests add nothing. Updates are request-local, not persisted session entries, and do not trigger agent turns. They accumulate until compaction, tree navigation, changed/truncated history, or session start/resume/reload rebuilds a fresh bounded snapshot. Recall limits bound the current selection, not accumulated update history; compact a long, frequently edited session to reclaim that space. `/pi-mem reload` keeps the prefix and appends any selection changes on the next request.
+
+Save-writing guidance and word limits are separately appended to the system prompt; changing those limits can still invalidate the prompt cache. Cache reuse also depends on the provider and other prompt changes. `/pi-mem` marks lessons omitted by recall limits; `/pi-mem reload` prints the refreshed recall block plus the database path (not a capture of the previous model request; output above 16 KiB can be clipped).
 
 ## Privacy, backups, and upgrades
 
