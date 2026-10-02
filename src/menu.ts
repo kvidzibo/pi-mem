@@ -6,7 +6,7 @@ import type { SelectItem } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { buildAudit, writeAudit } from "./audit.ts";
-import { clipped, globalRecallBytes, memoryContext, visible } from "./presentation.ts";
+import { clipped, formatTokens, globalRecallBytes, memoryContext, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { checkNew, DEFAULT_PRIORITY, GLOBAL_SCOPE, type Activity, type Lesson, type MemoryStore, type Origin } from "./store.ts";
 
@@ -400,8 +400,11 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
   }
 
   async function audit(): Promise<{ audit: string } | undefined> {
-    const scope = await choose("Audit memories — scope", "All active lessons, including those omitted from recall. Archived records stay excluded.",
-      [item("current", "Current project + global"), item("all", "All projects + global"), CANCEL]);
+    const { store: estimateStore, scope: estimateProject } = access.current();
+    const tokens = (allProjects: boolean) => formatTokens(Math.ceil(buildAudit(estimateStore, estimateProject, allProjects).length / 4));
+    const scope = await choose("Audit memories — scope", "All active lessons, including those omitted from recall. Archived records stay excluded.\nToken estimates include the full audit text and metadata (characters/4).",
+      [item("current", `Current project + global (~${tokens(false)} tokens)`),
+        item("all", `All projects + global (~${tokens(true)} tokens)`), CANCEL]);
     if (!scope || scope === "cancel") return;
     const output = await choose("Audit memories — output", "Request archive, priority, and global-scope recommendations with reasons. No changes without your approval.",
       [item("agent", "Send to agent"), item("file", "Export to file"), BACK]);

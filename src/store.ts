@@ -44,6 +44,7 @@ export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number
 
 const APPLICATION_ID = 0x504d454d; // PMEM
 const SCHEMA_VERSION = 7;
+const BUSY_TIMEOUT_MS = 2000;
 export const DEFAULT_PRIORITY = 5;
 
 export function checkedPriority(value: unknown, minimum = 0): number {
@@ -111,15 +112,35 @@ export class MemoryStore {
     }
     this.db = new DatabaseSync(path);
     try {
-      this.db.exec("PRAGMA busy_timeout = 2000; PRAGMA foreign_keys = ON;");
+      this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA foreign_keys = ON;`);
       this.transaction(() => this.initializeSchema());
-      const mode = this.db.prepare("PRAGMA journal_mode = WAL").get()!.journal_mode;
-      if (mode !== "wal") throw new Error("Memory database requires SQLite WAL support on a local filesystem");
+      this.enableWal();
       this.db.exec("PRAGMA synchronous = FULL;");
     } catch (error) {
       this.db.close();
       throw error;
     }
+  }
+
+  private enableWal(): void {
+    // Journal-mode lock upgrades can return BUSY without invoking SQLite's busy handler.
+    // Retry only this idempotent pragma, with one deadline rather than a timeout per attempt.
+    const deadline = performance.now() + BUSY_TIMEOUT_MS;
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    this.db.exec("PRAGMA busy_timeout = 0;");
+    try {
+      while (true) {
+        try {
+          const mode = this.db.prepare("PRAGMA journal_mode = WAL").get()!.journal_mode;
+          if (mode !== "wal") throw new Error("Memory database requires SQLite WAL support on a local filesystem");
+          return;
+        } catch (error) {
+          const remaining = deadline - performance.now();
+          if ((error as { errcode?: number })?.errcode !== 5 || remaining <= 0) throw error;
+          Atomics.wait(wait, 0, 0, Math.min(20, remaining));
+        }
+      }
+    } finally { this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`); }
   }
 
   private initializeSchema(): void {
