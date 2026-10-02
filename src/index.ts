@@ -4,6 +4,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
+import { buildAudit, writeAudit } from "./audit.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
@@ -15,7 +16,7 @@ type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
-const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "reload", "help"];
+const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "audit", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
   "/pi-mem global add|list|archived|search … — manage global lessons; ID commands resolve project or global lessons",
@@ -24,6 +25,7 @@ const HELP = [
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
   "/pi-mem history <id> [offset] — inspect retained activity and attribution",
   "/pi-mem move <id> <destination-path|--global|--project> — move lesson and linked history; --project means current project; preserve IDs",
+  "/pi-mem audit [--all-projects] [--file <path>] — audit all active project + global lessons; recommendations only; file must not exist",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -132,6 +134,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
     else pi.sendMessage({ customType: "pi-mem-report", content: text, display: true });
   }
 
+  function sendAudit(content: string) {
+    // Deliberate model-visible audit, unlike bounded chat-only command reports.
+    // No slash-command expansion; the menu has closed before dispatch.
+    pi.sendMessage({ customType: "pi-mem-audit", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+  }
+
   function recordSaved(ids: number[], ctx: ExtensionContext) {
     if (!ids.length) return;
     try {
@@ -218,6 +226,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       } finally {
         if (menu === controller) menu = undefined;
       }
+      if (action && typeof action === "object") { sendAudit(action.audit); return; }
       if (action !== "reload") return;
       reset();
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
@@ -343,7 +352,17 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(`Database: ${JSON.stringify(path)}\n${recall(ctx)}`, ctx);
           return;
         }
-        if (command === "list" || command === "archived") {
+        if (command === "audit") {
+          let [flag, tail] = firstWord(rest);
+          const allProjects = flag === "--all-projects";
+          if (allProjects) [flag, tail] = firstWord(tail);
+          if ((flag && flag !== "--file") || (flag === "--file" && !tail)) {
+            throw new Error("Usage: /pi-mem audit [--all-projects] [--file <new-file-path>]");
+          }
+          const content = buildAudit(store, project, allProjects);
+          if (flag === "--file") show(`Audit exported to ${JSON.stringify(writeAudit(ctx.cwd, tail, content))}. No memories changed.`, ctx);
+          else sendAudit(content);
+        } else if (command === "list" || command === "archived") {
           const offset = rest ? Number(rest) : 0;
           show(boundedPage(store.list(scope, { state: command === "archived" ? "archived" : "active", offset }), offset), ctx);
         } else if (command === "search") {
