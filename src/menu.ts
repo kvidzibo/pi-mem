@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
+import { buildAudit, writeAudit } from "./audit.ts";
 import { clipped, globalRecallBytes, memoryContext, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { checkNew, DEFAULT_PRIORITY, GLOBAL_SCOPE, type Activity, type Lesson, type MemoryStore, type Origin } from "./store.ts";
@@ -35,8 +36,8 @@ const CANCEL = item("cancel", "Cancel");
 const PAGE_SIZE = 1000;
 const errorText = (error: unknown) => visible(clipped(error instanceof Error ? error.message : String(error), 1000));
 
-/** Human-only navigation: no session messages or direct model calls. */
-export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | undefined> {
+/** Browsing stays private; only an explicitly confirmed audit can request an agent turn. */
+export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | { audit: string } | undefined> {
   const { signal } = access;
   let browsingScope: string | undefined;
   const viewState = (): MenuState => {
@@ -398,6 +399,34 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     ctx.ui.notify(`Moved ${moved} lessons to ${JSON.stringify(to)}.`, "info");
   }
 
+  async function audit(): Promise<{ audit: string } | undefined> {
+    const scope = await choose("Audit memories — scope", "All active lessons, including those omitted from recall. Archived records stay excluded.",
+      [item("current", "Current project + global"), item("all", "All projects + global"), CANCEL]);
+    if (!scope || scope === "cancel") return;
+    const output = await choose("Audit memories — output", "Request archive, priority, and global-scope recommendations with reasons. No changes without your approval.",
+      [item("agent", "Send to agent"), item("file", "Export to file"), BACK]);
+    if (!output || output === "back") return;
+    let path: string | undefined;
+    if (output === "file") {
+      path = await ctx.ui.input("Audit export — new file path (relative to Pi cwd; existing files are never overwritten)", "memory-audit.md", { signal });
+      access.check();
+      if (!path?.trim()) return;
+    }
+    const confirmed = await choose(output === "agent" ? "Send audit to agent?" : "Export audit?", [
+      scope === "all" ? "All stored projects + global (including missing project folders)." : `Current project: ${access.current().scope}\nGlobal lessons included.`,
+      "Includes full lesson text, evidence, origins, dates, IDs, and priorities. No recall or command-output limits apply.",
+      output === "agent" ? "Starts an agent turn; this data and project paths go to the selected model and remain in session history. Large audits may exceed its context window."
+        : `Create private file: ${path}\nNo agent turn. The file contains memory data and project paths; keep it out of Git.`,
+      "Recommendations only. Archive retains records; it is not deletion. Priority 0 is user-reserved.",
+    ].join("\n\n"), [CANCEL, item("confirm", output === "agent" ? "Send to agent" : "Export")]);
+    if (confirmed !== "confirm") return;
+    const { store, scope: project } = access.current();
+    const content = buildAudit(store, project, scope === "all");
+    if (output === "agent") return { audit: content };
+    const written = writeAudit(ctx.cwd, path!, content);
+    ctx.ui.notify(`Audit exported to ${JSON.stringify(written)}. No memories changed.`, "info");
+  }
+
   async function status() {
     const lines = [`Config: ${JSON.stringify(access.configPath)}`, `Pi cwd: ${JSON.stringify(ctx.cwd)}`];
     try {
@@ -435,7 +464,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("global", "Global lessons"), item("projects", "All projects"), item("move", "Move memory")] : []),
+        item("global", "Global lessons"), item("projects", "All projects"), item("audit", "Audit…"), item("move", "Move memory")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -443,12 +472,16 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     if (action === "reload") return "reload";
     try {
       if (action === "status") await status();
-      else if (action === "help") await choose("Memory help", access.help + "\n\nBrowsing stays in the UI; it does not add conversation messages.\nReplace and archive retain records. There is no restore or delete.", [BACK]);
+      else if (action === "help") await choose("Memory help", access.help + "\n\nBrowsing stays in the UI; only a confirmed audit sends lessons to the agent.\nReplace and archive retain records. There is no restore or delete.", [BACK]);
       else if (action === "browse" || action === "archived") await browse(action === "archived");
       else if (action === "global") await globalLessons();
       else if (action === "projects") await browseProjects();
       else if (action === "add") await saveLesson();
       else if (action === "move") await moveMemory();
+      else if (action === "audit") {
+        const result = await audit();
+        if (result) return result;
+      }
     } catch (error) { access.check(); reportError(error); }
   }
 }

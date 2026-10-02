@@ -412,7 +412,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const project = join(directory, "project");
   mkdirSync(project);
   const notices: string[] = [];
-  const messages: Array<{ content: string }> = [];
+  const messages: Array<{ content: string; customType?: string }> = [];
+  const dispatchOptions: unknown[] = [];
   type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; absent?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
@@ -491,7 +492,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   };
   try {
     extension = await load();
-    extension.runtime.sendMessage = (message: { content: string }) => messages.push(message);
+    extension.runtime.sendMessage = (message: { content: string }, options: unknown) => {
+      messages.push(message);
+      dispatchOptions.push(options);
+    };
     await event("session_start");
     observer = new MemoryStore(process.env.PI_MEMORY_DB);
     for (let offset = 0; offset < 1002; offset += 500) {
@@ -731,6 +735,52 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.list(GLOBAL_SCOPE, { state: "archived" }).total, 2);
     assert.equal(observer.list(GLOBAL_SCOPE).total, 0);
 
+    // Audit bypasses recall/output limits but requires an explicit destination and approval.
+    const globalAudit = observer.add(GLOBAL_SCOPE, { text: "Global audit lesson.", evidence: "Verified.", basis: "user_request", priority: 0 }, moveOrigin).lesson;
+    const foreignAudit = observer.add(foreignScope, { text: "Foreign audit lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    const historyBeforeAudit = observer.history(project, original.id);
+    steps.push({ title: "Memory ·", choice: "Audit…" },
+      { title: "Audit memories — scope", choice: "Current project + global" },
+      { title: "Audit memories — output", choice: "Send to agent" },
+      { title: "Send audit to agent?", choice: "Cancel", match: /selected model[\s\S]*Priority 0/ },
+      { title: "Memory ·" });
+    await run();
+    assert.equal(messages.length, 0);
+    const file = join(directory, "menu audit.md");
+    inputs.push(file);
+    steps.push({ title: "Memory ·", choice: "Audit…" },
+      { title: "Audit memories — scope", choice: "All projects + global" },
+      { title: "Audit memories — output", choice: "Export to file" },
+      { title: "Export audit?", choice: "Export", match: /missing project folders[\s\S]*No agent turn/ },
+      { title: "Memory ·" });
+    await run();
+    assert.match(readFileSync(file, "utf8"), /Foreign audit lesson/);
+    assert.equal(messages.length, 0, "file audit must not dispatch a model message");
+    steps.push({ title: "Memory ·", choice: "Audit…" },
+      { title: "Audit memories — scope", choice: "Current project + global" },
+      { title: "Audit memories — output", choice: "Send to agent" },
+      { title: "Send audit to agent?", choice: "Send to agent" });
+    await run(); // Sending exits the menu instead of reopening it over an agent turn.
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].customType, "pi-mem-audit");
+    assert.match(messages[0].content, /Seed 1\.[\s\S]*Seed 1000\.|Seed 1000\.[\s\S]*Seed 1\./);
+    assert.match(messages[0].content, /Global audit lesson/);
+    assert.doesNotMatch(messages[0].content, /Foreign audit lesson|Seed 0\. Corrected\./);
+    assert.ok(Buffer.byteLength(messages[0].content) > 16384);
+    assert.deepEqual(dispatchOptions[0], { triggerTurn: true, deliverAs: "followUp" });
+    await command.handler("audit --all-projects", ctx);
+    assert.match(messages.at(-1)!.content, /Foreign audit lesson/);
+    const directFile = join(project, "direct audit.md");
+    await command.handler("audit --file direct audit.md", ctx);
+    assert.equal(readFileSync(directFile, "utf8"), messages[0].content);
+    await command.handler("audit --file direct audit.md", ctx);
+    assert.match(notices.at(-1)!, /EEXIST/);
+    await command.handler("audit --file", ctx);
+    assert.match(notices.at(-1)!, /Usage:/);
+    assert.deepEqual(observer.history(project, original.id), historyBeforeAudit);
+    assert.equal(observer.get(GLOBAL_SCOPE, globalAudit.id).priority, 0);
+    assert.equal(observer.get(foreignScope, foreignAudit.id).archived, false);
+
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
     const total = observer.list(project).total;
     steps.push({ title: "Memory ·", choice: "Add lesson" }, { title: "Add lesson", text: "Must not save." },
@@ -747,10 +797,11 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·", choice: "Reload memory", before: () => { writeFileSync(config, settings); } },
       { title: "Memory ·", match: /0 active · 0 loaded/ });
     await run();
+    const beforeReport = messages.length;
     ctx.hasUI = false; ctx.mode = "print";
     await command.handler("", ctx);
-    assert.equal(messages.length, 1);
-    assert.match(messages[0].content, /^Database: .+\nPROJECT LESSONS$/);
+    assert.equal(messages.length, beforeReport + 1);
+    assert.match(messages.at(-1)!.content, /^Database: .+\nPROJECT LESSONS$/);
   } finally {
     await event("session_shutdown");
     observer?.close();

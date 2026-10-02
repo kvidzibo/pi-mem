@@ -464,6 +464,15 @@ export class MemoryStore {
     return { lessons, total, nextOffset: next < total ? next : null };
   }
 
+  /** Explicit user audits only: one consistent read, unrestricted by recall/list limits. */
+  auditLessons(project: string, allProjects = false): Lesson[] {
+    this.checkScope(project);
+    const where = allProjects ? "" : "AND scope IN (?, ?)";
+    return this.db.prepare(`SELECT * FROM lessons WHERE archived = 0 ${where}
+      ORDER BY scope, priority, created_at DESC, id`)
+      .all(...(allProjects ? [] : [project, GLOBAL_SCOPE])).map(lesson);
+  }
+
   /** Creations and their linked predecessor archives remain attributable after reload. */
   sessionCreations(scope: string, origin: Origin): { added: number; superseded: number } {
     this.checkScope(scope);
