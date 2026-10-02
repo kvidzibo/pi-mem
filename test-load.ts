@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { formatTokens, memoryContext } from "./src/presentation.ts";
+import { buildAudit } from "./src/audit.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -739,8 +740,13 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     const globalAudit = observer.add(GLOBAL_SCOPE, { text: "Global audit lesson.", evidence: "Verified.", basis: "user_request", priority: 0 }, moveOrigin).lesson;
     const foreignAudit = observer.add(foreignScope, { text: "Foreign audit lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     const historyBeforeAudit = observer.history(project, original.id);
+    const currentAudit = buildAudit(observer, project);
+    const allAudit = buildAudit(observer, project, true);
+    assert.ok(allAudit.length > currentAudit.length);
+    const currentTokens = formatTokens(Math.ceil(currentAudit.length / 4));
+    const allTokens = formatTokens(Math.ceil(allAudit.length / 4));
     steps.push({ title: "Memory ·", choice: "Audit…" },
-      { title: "Audit memories — scope", choice: "Current project + global" },
+      { title: "Audit memories — scope", choice: `Current project + global (~${currentTokens} tokens)`, match: /full audit text and metadata/ },
       { title: "Audit memories — output", choice: "Send to agent" },
       { title: "Send audit to agent?", choice: "Cancel", match: /selected model[\s\S]*Priority 0/ },
       { title: "Memory ·" });
@@ -749,11 +755,12 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     const file = join(directory, "menu audit.md");
     inputs.push(file);
     steps.push({ title: "Memory ·", choice: "Audit…" },
-      { title: "Audit memories — scope", choice: "All projects + global" },
+      { title: "Audit memories — scope", choice: `All projects + global (~${allTokens} tokens)` },
       { title: "Audit memories — output", choice: "Export to file" },
       { title: "Export audit?", choice: "Export", match: /missing project folders[\s\S]*No agent turn/ },
       { title: "Memory ·" });
     await run();
+    assert.equal(readFileSync(file, "utf8"), allAudit);
     assert.match(readFileSync(file, "utf8"), /Foreign audit lesson/);
     assert.equal(messages.length, 0, "file audit must not dispatch a model message");
     steps.push({ title: "Memory ·", choice: "Audit…" },
@@ -763,6 +770,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await run(); // Sending exits the menu instead of reopening it over an agent turn.
     assert.equal(messages.length, 1);
     assert.equal(messages[0].customType, "pi-mem-audit");
+    assert.equal(messages[0].content, currentAudit);
     assert.match(messages[0].content, /Seed 1\.[\s\S]*Seed 1000\.|Seed 1000\.[\s\S]*Seed 1\./);
     assert.match(messages[0].content, /Global audit lesson/);
     assert.doesNotMatch(messages[0].content, /Foreign audit lesson|Seed 0\. Corrected\./);
