@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -331,6 +331,83 @@ test("independent processes can initialize and write the same WAL database", asy
   const db = new MemoryStore(path);
   t.after(() => db.close());
   assert.equal(db.list("/project").total, 3);
+});
+
+test("WAL conversion retries a concurrent reader but fails within a bounded wait", async (t) => {
+  const path = temporary(t);
+  const seed = new MemoryStore(path);
+  const saved = seed.add("/project", input, source).lesson;
+  seed.close();
+  let reader = new DatabaseSync(path);
+  t.after(() => reader.close());
+  const module = new URL("../src/store.ts", import.meta.url).href;
+  const run = promisify(execFile);
+  for (const release of [true, false]) {
+    reader.exec("PRAGMA journal_mode = DELETE;");
+    const gate = `${path}.${release}.ready`;
+    let locked = false;
+    let ready = false;
+    let busy = false;
+    const started = performance.now();
+    const opening = run(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { DatabaseSync } from 'node:sqlite';
+      import { existsSync } from 'node:fs';
+      import { MemoryStore } from ${JSON.stringify(module)};
+      const exec = DatabaseSync.prototype.exec;
+      DatabaseSync.prototype.exec = function(sql) {
+        const result = exec.call(this, sql);
+        if (sql === 'COMMIT') {
+          console.log('SCHEMA_READY');
+          const deadline = performance.now() + 5000;
+          const wait = new Int32Array(new SharedArrayBuffer(4));
+          while (!existsSync(${JSON.stringify(gate)})) {
+            assert.ok(performance.now() < deadline, 'reader barrier timed out');
+            Atomics.wait(wait, 0, 0, 5);
+          }
+        }
+        return result;
+      };
+      const prepare = DatabaseSync.prototype.prepare;
+      DatabaseSync.prototype.prepare = function(sql) {
+        const statement = prepare.call(this, sql);
+        if (sql !== 'PRAGMA journal_mode = WAL') return statement;
+        return { get() {
+          try { return statement.get(); }
+          catch (error) { if (error.errcode === 5) console.log('WAL_BUSY'); throw error; }
+        } };
+      };
+      try {
+        const db = new MemoryStore(${JSON.stringify(path)});
+        assert.deepEqual(db.get('/project', ${saved.id}), ${JSON.stringify(saved)});
+        db.close();
+        console.log('OPENED');
+      } catch (error) { console.error('OPEN_ERROR:' + error.errcode); process.exitCode = 1; }
+    `], { timeout: 10000, env: {} });
+    let output = "";
+    opening.child.stdout?.on("data", (chunk) => {
+      output += chunk;
+      if (!ready && output.includes("SCHEMA_READY")) {
+        reader.exec("BEGIN;");
+        reader.prepare("SELECT * FROM lessons").get();
+        locked = true;
+        ready = true;
+        writeFileSync(gate, "ready");
+      }
+      if (!output.includes("WAL_BUSY")) return;
+      busy = true;
+      if (release && locked) { reader.exec("ROLLBACK"); locked = false; }
+    });
+    try {
+      if (release) assert.match((await opening).stdout, /OPENED/);
+      else await assert.rejects(opening, (error: unknown) => /OPEN_ERROR:5/.test((error as { stderr: string }).stderr));
+      assert.ok(busy, "the reader must force a real SQLITE_BUSY during WAL conversion");
+      assert.ok(performance.now() - started < 8000, "persistent contention must not hang initialization");
+    } finally { if (locked) reader.exec("ROLLBACK"); }
+    reader.close();
+    reader = new DatabaseSync(path);
+    assert.equal(reader.prepare("PRAGMA journal_mode").get()!.journal_mode, release ? "wal" : "delete");
+  }
 });
 
 test("unrelated databases are refused and invalid batches do not partially save", (t) => {
