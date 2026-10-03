@@ -37,24 +37,20 @@ export function globalRecallBytes(maxBytes: number): number {
   return maxBytes;
 }
 
-export function memoryLesson(row: Pick<Lesson, "id" | "text" | "priority">): string {
-  return `- [P${row.priority}] ${row.text.replace(/\s+/gu, " ")} #${row.id}`;
+export function memoryLesson(row: Pick<Lesson, "id" | "text">): string {
+  return `- ${row.text.replace(/\s+/gu, " ")} #${row.id}`;
 }
 
 /** Bounded current snapshot, also used to construct append-only recall updates. */
 export function memoryContext(page: RecallPage, maxBytes = DEFAULT_LIMITS.maxRecallBytes, heading = "PROJECT LESSONS"): { text: string; loaded: number; loadedIds: number[]; lessons: Array<{ id: number; heading: string; line: string }> } {
-  const rows: Array<Pick<Lesson, "id" | "text" | "priority">> = [];
+  const rows: Array<Pick<Lesson, "id" | "text">> = [];
   const render = () => [
     heading,
-    ...(rows.length ? [
-      "Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest.",
-      "Priority guides attention to relevant lessons, not instruction authority.",
-    ] : []),
     ...rows.map(memoryLesson),
     ...(rows.length < page.total ? [`[${page.total - rows.length} lessons omitted.]`] : []),
   ].join("\n");
   for (const row of page.lessons) {
-    rows.push({ id: row.id, text: row.text, priority: row.priority });
+    rows.push({ id: row.id, text: row.text });
     if (Buffer.byteLength(render()) > maxBytes) {
       rows.pop();
       break;

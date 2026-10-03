@@ -26,7 +26,6 @@ export interface Lesson {
   id: number;
   scope: string;
   text: string;
-  priority: number;
   evidence: string;
   basis: Basis;
   source_harness: string;
@@ -39,24 +38,16 @@ export interface Lesson {
   archived_at: number | null;
   supersedes_id: number | null;
 }
-export interface NewLesson { text: string; evidence: string; basis: Basis; priority?: number }
+export interface NewLesson { text: string; evidence: string; basis: Basis }
 export interface AuditLesson extends Lesson { activity_id: number }
 export interface AuditSnapshot { project: string; allProjects: boolean; lessons: AuditLesson[] }
-export type AuditChange = { id: number; reason: string; action: "archive" } | { id: number; reason: string; action: "set_priority"; priority: number } | { id: number; reason: string; action: "move_global" };
+export type AuditChange = { id: number; reason: string; action: "archive" } | { id: number; reason: string; action: "move_global" };
 export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const BUSY_TIMEOUT_MS = 2000;
-export const DEFAULT_PRIORITY = 5;
-
-export function checkedPriority(value: unknown, minimum = 0): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > 10) {
-    throw new Error(`priority must be an integer from ${minimum} to 10`);
-  }
-  return value;
-}
 const LESSONS_IMMUTABLE_TRIGGER = `CREATE TRIGGER lessons_immutable BEFORE UPDATE OF
   id, scope, text, text_key, evidence, basis, source_harness, source_session,
   created_at, updated_at, revision, supersedes_id ON lessons
@@ -82,7 +73,6 @@ export function checkNew(input: NewLesson, limits: Readonly<MemoryLimits>): NewL
     text: checkedText(input.text, "text", MAX_TEXT),
     evidence: checkedText(input.evidence, "evidence", MAX_EVIDENCE),
     basis: input.basis,
-    ...(input.priority !== undefined ? { priority: checkedPriority(input.priority) } : {}),
   };
   for (const [field, max] of [["text", limits.maxLessonWords], ["evidence", limits.maxEvidenceWords]] as const) {
     const count = checked[field].split(/\s+/u).length;
@@ -159,55 +149,17 @@ export class MemoryStore {
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
     const empty = application === 0 && version === 0 &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length === 0;
-    if (application === APPLICATION_ID && version === 7) {
-      return;
-    }
-    if (application === APPLICATION_ID && version === 6) {
-      this.initializeActivityHistory();
-      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      return;
-    }
-    if (application === APPLICATION_ID && version === 5) {
-      this.db.exec(`ALTER TABLE lessons ADD COLUMN priority INTEGER NOT NULL DEFAULT ${DEFAULT_PRIORITY}
-        CHECK(typeof(priority) = 'integer' AND priority BETWEEN 0 AND 10);
-        DROP INDEX lessons_recall;
-        CREATE INDEX lessons_recall ON lessons(scope, archived, priority, created_at DESC, id);`);
-      this.initializePriorityHistory();
-      this.initializeActivityHistory();
-      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      return;
-    }
-    const upgrading = application === APPLICATION_ID && [1, 2, 3, 4].includes(version);
-    if (!empty && !upgrading) {
+    if (!empty) {
       if (application !== APPLICATION_ID || version !== SCHEMA_VERSION) {
-        throw new Error(`Not a supported pi-mem database (application=${application}, schema=${version})`);
+        throw new Error(`Not a supported pi-mem database (application=${application}, schema=${version}); use a fresh database`);
       }
       return;
-    }
-    if (upgrading) {
-      // Rebuild atomically; the old indexes/triggers otherwise retain their names after renaming.
-      this.db.exec(`
-        DROP INDEX IF EXISTS lessons_active_text;
-        DROP INDEX IF EXISTS lessons_recall;
-        DROP TRIGGER IF EXISTS lessons_immutable;
-        DROP TRIGGER IF EXISTS lessons_archive_only;
-        DROP TRIGGER IF EXISTS lessons_no_delete;
-        DROP TRIGGER IF EXISTS lessons_no_replace;
-        DROP TRIGGER IF EXISTS lessons_successor_scope;
-        ALTER TABLE lessons RENAME TO lessons_previous;
-      `);
-      if (version >= 3 && this.db.prepare(`SELECT 1 FROM lessons_previous AS child
-        WHERE supersedes_id IS NOT NULL AND NOT EXISTS (
-          SELECT 1 FROM lessons_previous AS parent
-          WHERE parent.id = child.supersedes_id AND parent.scope = child.scope AND parent.archived = 1)
-        LIMIT 1`).get()) throw new Error("Cannot migrate invalid lesson predecessor links");
     }
     this.db.exec(`
       CREATE TABLE lessons (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
         scope TEXT NOT NULL,
         text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND ${MAX_TEXT}),
-        priority INTEGER NOT NULL DEFAULT ${DEFAULT_PRIORITY} CHECK(typeof(priority) = 'integer' AND priority BETWEEN 0 AND 10),
         text_key TEXT NOT NULL,
         evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND ${MAX_EVIDENCE}),
         basis TEXT NOT NULL CHECK(basis IN ('validated_learning', 'validated_fix', 'user_request', 'import')),
@@ -221,25 +173,9 @@ export class MemoryStore {
         supersedes_id INTEGER UNIQUE REFERENCES lessons(id)
       ) WITHOUT ROWID;
     `);
-    // UUIDs exist only in this migration query; already-integer v4 IDs must not be renumbered.
-    if (upgrading) this.db.exec(`
-      WITH numbered AS (
-        SELECT ${version === 4 ? "id" : "row_number() OVER (ORDER BY created_at, id)"} AS new_id, * FROM lessons_previous
-      )
-      INSERT INTO lessons
-        (id, scope, text, text_key, evidence, basis, source_harness, source_session,
-         created_at, updated_at, revision, archived, archived_at, supersedes_id)
-      SELECT old.new_id, old.scope, old.text, old.text_key, old.evidence, old.basis,
-        old.source_harness, old.source_session, old.created_at, old.updated_at, old.revision, old.archived,
-        ${version >= 3 ? "old.archived_at, predecessor.new_id" : "NULL, NULL"}
-      FROM numbered AS old
-      ${version >= 3 ? "LEFT JOIN numbered AS predecessor ON predecessor.id = old.supersedes_id" : ""};
-      DROP TABLE lessons_previous;
-    `);
-    // Preserve lesson metadata; v1/v2 archive dates remain unknown (NULL).
     this.db.exec(`
       CREATE UNIQUE INDEX lessons_active_text ON lessons(scope, text_key) WHERE archived = 0;
-      CREATE INDEX lessons_recall ON lessons(scope, archived, priority, created_at DESC, id);
+      CREATE INDEX lessons_recall ON lessons(scope, archived, created_at DESC, id);
       ${LESSONS_IMMUTABLE_TRIGGER}
       CREATE TRIGGER lessons_archive_only BEFORE UPDATE OF archived, archived_at ON lessons
       WHEN OLD.archived != 0 OR NEW.archived != 1 OR NEW.archived_at IS NULL
@@ -261,32 +197,7 @@ export class MemoryStore {
       PRAGMA application_id = ${APPLICATION_ID};
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
-    this.initializePriorityHistory();
     this.initializeActivityHistory();
-    if (this.db.prepare("PRAGMA foreign_key_check").all().length) throw new Error("Invalid migrated lesson links");
-  }
-
-  private initializePriorityHistory(): void {
-    this.db.exec(`
-      CREATE TABLE priority_changes (
-        id INTEGER PRIMARY KEY,
-        lesson_id INTEGER NOT NULL REFERENCES lessons(id),
-        old_priority INTEGER NOT NULL CHECK(old_priority BETWEEN 0 AND 10),
-        new_priority INTEGER NOT NULL CHECK(new_priority BETWEEN 0 AND 10),
-        changed_at INTEGER NOT NULL,
-        source_harness TEXT NOT NULL,
-        source_session TEXT
-      ) WITHOUT ROWID;
-      CREATE TRIGGER priority_changes_no_update BEFORE UPDATE ON priority_changes
-        BEGIN SELECT RAISE(ABORT, 'Priority history is immutable'); END;
-      CREATE TRIGGER priority_changes_no_delete BEFORE DELETE ON priority_changes
-        BEGIN SELECT RAISE(ABORT, 'Priority history cannot be deleted'); END;
-      CREATE TRIGGER priority_changes_no_replace BEFORE INSERT ON priority_changes
-        WHEN EXISTS (SELECT 1 FROM priority_changes WHERE id = NEW.id)
-        BEGIN SELECT RAISE(ABORT, 'Priority history cannot be replaced'); END;
-      CREATE TRIGGER lessons_archived_priority BEFORE UPDATE OF priority ON lessons WHEN OLD.archived = 1
-        BEGIN SELECT RAISE(ABORT, 'Archived lesson priority is read-only'); END;
-    `);
   }
 
   private initializeActivityHistory(): void {
@@ -294,7 +205,7 @@ export class MemoryStore {
       CREATE TABLE activity (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id > 0),
         lesson_id INTEGER NOT NULL REFERENCES lessons(id),
-        action TEXT NOT NULL CHECK(action IN ('create', 'import', 'supersede', 'archive', 'set_priority', 'move')),
+        action TEXT NOT NULL CHECK(action IN ('create', 'import', 'supersede', 'archive', 'move')),
         at INTEGER,
         actor TEXT NOT NULL CHECK(actor IN ('user', 'model', 'unknown')),
         provider TEXT, model TEXT, harness TEXT NOT NULL, session TEXT, reason TEXT,
@@ -310,24 +221,6 @@ export class MemoryStore {
         WHEN EXISTS (SELECT 1 FROM activity WHERE id = NEW.id)
         BEGIN SELECT RAISE(ABORT, 'Activity cannot be replaced'); END;
     `);
-    // Only retained facts: current project/priority are not evidence of their creation-time values.
-    for (const row of this.db.prepare("SELECT * FROM lessons ORDER BY created_at, id").all()) {
-      const current = lesson(row);
-      const source = { harness: current.source_harness, session: current.source_session };
-      this.log(current.id, current.basis === "import" ? "import" : "create", source,
-        { predecessor_id: current.supersedes_id, retained_revision: current.revision }, current.created_at, true);
-      if (current.archived) {
-        const successor = this.db.prepare("SELECT id, source_harness, source_session FROM lessons WHERE supersedes_id = ?").get(current.id);
-        const archiver = successor ? { harness: String(successor.source_harness), session: successor.source_session as string | null } : UNKNOWN_ORIGIN;
-        this.log(current.id, successor ? "supersede" : "archive", archiver,
-          { before: "active", after: "archived", ...(successor ? { successor_id: Number(successor.id) } : {}) },
-          current.archived_at, true);
-      }
-    }
-    for (const row of this.db.prepare("SELECT * FROM priority_changes ORDER BY changed_at, id").all()) {
-      this.log(Number(row.lesson_id), "set_priority", { harness: String(row.source_harness), session: row.source_session as string | null },
-        { before: Number(row.old_priority), after: Number(row.new_priority) }, Number(row.changed_at), true);
-    }
   }
 
   private log(id: number, action: string, origin: Origin, details: Record<string, unknown>, at: number | null = Date.now(), historical = false): void {
@@ -350,27 +243,6 @@ export class MemoryStore {
     const events = rows.slice(0, limit).map((row) => ({ ...row,
       details: JSON.parse(String(row.details)), historical: row.historical === 1 } as Activity));
     return { events, nextOffset: rows.length > limit ? offset + limit : null };
-  }
-
-  /** Metadata change; lesson identity and content stay untouched. */
-  setPriority(scope: string, id: number, priority: number, origin: Origin): Lesson {
-    checkedPriority(priority, origin.actor === "model" ? 1 : 0);
-    this.checkOrigin(origin);
-    return this.transaction(() => this.setPriorityInTransaction(scope, id, priority, origin));
-  }
-
-  private setPriorityInTransaction(scope: string, id: number, priority: number, origin: Origin): Lesson {
-    const current = this.get(scope, id);
-    if (current.archived) throw new Error("Archived lesson priority is read-only");
-    if (origin.actor === "model" && current.priority === 0) throw new Error("Priority 0 is user-reserved; models cannot reprioritize it");
-    if (current.priority === priority) return current;
-    this.db.prepare(`INSERT INTO priority_changes
-      (id, lesson_id, old_priority, new_priority, changed_at, source_harness, source_session)
-      VALUES ((SELECT coalesce(max(id), 0) + 1 FROM priority_changes), ?, ?, ?, ?, ?, ?)`)
-      .run(id, current.priority, priority, Date.now(), origin.harness, origin.session);
-    this.db.prepare("UPDATE lessons SET priority = ? WHERE scope = ? AND id = ?").run(priority, scope, id);
-    this.log(id, "set_priority", origin, { before: current.priority, after: priority });
-    return this.get(scope, id);
   }
 
   stageCandidate(project: string, input: CandidateSubmission, origin: Origin, independenceKey: string): { accepted: true } {
@@ -513,7 +385,7 @@ export class MemoryStore {
       ${excluded.length ? "AND id NOT IN (SELECT value FROM json_each(?))" : ""}`;
     const params = [scope, state, state === "archived" ? 1 : 0, query, ...(excluded.length ? [JSON.stringify(excluded)] : [])];
     const total = Number(this.db.prepare(`SELECT count(*) AS n FROM lessons WHERE ${where}`).get(...params)!.n);
-    const lessons = this.db.prepare(`SELECT * FROM lessons WHERE ${where} ORDER BY priority, created_at DESC, id LIMIT ? OFFSET ?`)
+    const lessons = this.db.prepare(`SELECT * FROM lessons WHERE ${where} ORDER BY created_at DESC, id LIMIT ? OFFSET ?`)
       .all(...params, limit, offset).map(lesson);
     const next = offset + lessons.length;
     return { lessons, total, nextOffset: next < total ? next : null };
@@ -524,7 +396,7 @@ export class MemoryStore {
     this.checkScope(project);
     const where = allProjects ? "" : "AND scope IN (?, ?)";
     return this.db.prepare(`SELECT * FROM lessons WHERE archived = 0 ${where}
-      ORDER BY scope, priority, created_at DESC, id`)
+      ORDER BY scope, created_at DESC, id`)
       .all(...(allProjects ? [] : [project, GLOBAL_SCOPE])).map(lesson);
   }
 
@@ -532,7 +404,7 @@ export class MemoryStore {
     this.checkScope(project);
     const where = allProjects ? "" : "AND l.scope IN (?, ?)";
     const rows = this.db.prepare(`SELECT l.*, (SELECT max(a.id) FROM activity a WHERE a.lesson_id = l.id) AS activity_id
-      FROM lessons l WHERE l.archived = 0 ${where} ORDER BY l.scope, l.priority, l.created_at DESC, l.id`)
+      FROM lessons l WHERE l.archived = 0 ${where} ORDER BY l.scope, l.created_at DESC, l.id`)
       .all(...(allProjects ? [] : [project, GLOBAL_SCOPE]));
     return { project, allProjects, lessons: rows.map((row) => ({ ...lesson(row), activity_id: Number(row.activity_id) })) };
   }
@@ -548,9 +420,6 @@ export class MemoryStore {
       checkedText(change.reason, "reason", 600);
       if (change.action === "archive" || change.action === "move_global") {
         if (Object.keys(change).some((key) => !["id", "reason", "action"].includes(key))) throw new Error("Invalid audit change fields");
-      } else if (change.action === "set_priority") {
-        checkedPriority(change.priority, 1);
-        if (Object.keys(change).some((key) => !["id", "reason", "action", "priority"].includes(key))) throw new Error("Invalid audit change fields");
       } else throw new Error("Invalid audit action");
     }
     return this.transaction(() => {
@@ -563,9 +432,7 @@ export class MemoryStore {
         if (!currentRow) throw new Error("Audit snapshot is stale");
         const current = lesson(currentRow);
         const activity = this.db.prepare("SELECT max(id) AS id FROM activity WHERE lesson_id = ?").get(expected.id)!;
-        if (current.archived || current.scope !== expected.scope || current.priority !== expected.priority || Number(activity.id) !== expected.activity_id) throw new Error("Audit snapshot is stale");
-        if (current.priority === 0) throw new Error("Priority 0 lessons cannot be changed in an audit");
-        if (change.action === "set_priority" && current.priority === change.priority) throw new Error("Priority is unchanged");
+        if (current.archived || current.scope !== expected.scope || Number(activity.id) !== expected.activity_id) throw new Error("Audit snapshot is stale");
         if (change.action === "move_global" && current.scope === GLOBAL_SCOPE) throw new Error("Lesson is already global");
         rows.set(change.id, current);
       }
@@ -575,9 +442,6 @@ export class MemoryStore {
         if (change.action === "archive") {
           const result = this.archiveInTransaction(current.scope, current.id, scopedOrigin);
           return { action: change.action, from: current.scope, lesson: result.lesson };
-        }
-        if (change.action === "set_priority") {
-          return { action: change.action, from: current.scope, lesson: this.setPriorityInTransaction(current.scope, current.id, change.priority, scopedOrigin) };
         }
         const moved = this.moveLessonInTransaction(current.scope, current.id, GLOBAL_SCOPE, scopedOrigin);
         return { action: change.action, from: current.scope, lesson: this.get(GLOBAL_SCOPE, current.id), moved };
@@ -604,7 +468,7 @@ export class MemoryStore {
       total,
       // Stream one ordered query; breaking at the byte budget closes the cursor without reading every lesson.
       lessons: (function* () {
-        const rows = db.prepare("SELECT * FROM lessons WHERE scope = ? AND archived = 0 ORDER BY priority, created_at DESC, id LIMIT ?")
+        const rows = db.prepare("SELECT * FROM lessons WHERE scope = ? AND archived = 0 ORDER BY created_at DESC, id LIMIT ?")
           .iterate(scope, limit);
         for (const row of rows) yield lesson(row);
       })(),
@@ -630,7 +494,7 @@ export class MemoryStore {
   }
 
   /** Create a successor and retire its predecessor together, retaining all original content and provenance. */
-  supersede(scope: string, id: number, input: NewLesson, origin: Origin, preserveExtreme = false): Lesson {
+  supersede(scope: string, id: number, input: NewLesson, origin: Origin): Lesson {
     const checked = checkNew(input, this.limits);
     this.checkOrigin(origin);
     return this.transaction(() => {
@@ -641,9 +505,7 @@ export class MemoryStore {
       if (duplicate) throw new Error(`Duplicate active lesson already exists: ${duplicate.id}`);
       const now = Math.max(Date.now(), current.created_at + 1, current.updated_at);
       this.retire(scope, current.id, now);
-      const successor = this.insert(scope, { ...checked,
-        priority: (preserveExtreme || origin.actor === "model") && current.priority === 0 ? 0 : checked.priority ?? current.priority,
-      }, origin, now, current.id);
+      const successor = this.insert(scope, checked, origin, now, current.id);
       this.log(current.id, "supersede", origin, { before: "active", after: "archived", successor_id: successor.id }, now);
       return successor;
     });
@@ -672,12 +534,12 @@ export class MemoryStore {
     const id = Number(this.db.prepare("SELECT coalesce(max(id), 0) + 1 AS id FROM lessons").get()!.id);
     if (!Number.isSafeInteger(id)) throw new Error("Lesson ID range exhausted");
     this.db.prepare(`INSERT INTO lessons
-      (id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, supersedes_id, priority)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      id, scope, input.text, textKey(input.text), input.evidence, input.basis, origin.harness, origin.session, now, now, supersedesId, input.priority ?? DEFAULT_PRIORITY,
+      (id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, supersedes_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      id, scope, input.text, textKey(input.text), input.evidence, input.basis, origin.harness, origin.session, now, now, supersedesId,
     );
     this.log(id, input.basis === "import" ? "import" : "create", origin,
-      { scope, priority: input.priority ?? DEFAULT_PRIORITY, predecessor_id: supersedesId }, now);
+      { scope, predecessor_id: supersedesId }, now);
     return this.get(scope, id);
   }
 }

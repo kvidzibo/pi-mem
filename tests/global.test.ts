@@ -36,8 +36,8 @@ test("global lessons follow sessions across projects without exposing other proj
   let store: MemoryStore | undefined;
   let report: any;
   loaded.runtime.sendMessage = (message: { content: string }) => { report = JSON.parse(message.content); };
-  const add = async (text: string, scope = "project", priority = 3) => {
-    await extension.commands.get("pi-mem").handler(`${scope === "global" ? "global " : ""}add --priority ${priority} ${text}`, ctx);
+  const add = async (text: string, scope = "project") => {
+    await extension.commands.get("pi-mem").handler(`${scope === "global" ? "global " : ""}add ${text}`, ctx);
     return report;
   };
   try {
@@ -55,24 +55,23 @@ test("global lessons follow sessions across projects without exposing other proj
     assert.match(recall, /^GLOBAL LESSONS/);
     assert.match(recall, new RegExp(`#${global.id}\\n\\nPROJECT LESSONS`));
     assert.match(recall, new RegExp(`#${local.id}$`));
-    const extra = await add("A lower priority global lesson.", "global", 9);
+    const extra = await add("A newer global lesson.", "global");
     const updated = (await event("context", { messages: [] })).messages;
     assert.equal(updated[0].content, recall, "the original global and project snapshot stays cached");
     assert.match(updated.at(-1).content, /1 lessons omitted/);
-    assert.doesNotMatch(updated.at(-1).content, new RegExp(`#${extra.id}(?:\\n|$)`));
-    assert.doesNotMatch(updated.at(-1).content, /No longer recalled/, "global budget cannot crowd out project recall");
+    assert.match(updated.at(-1).content, new RegExp(`#${extra.id}(?:\\n|$)`));
+    assert.doesNotMatch(updated.at(-1).content, new RegExp(`No longer recalled[^\\n]*#${local.id}(?:\\D|$)`),
+      "global recall cannot crowd out project recall");
     ctx.cwd = other;
     recall = (await event("context", { messages: [] })).messages.at(-1).content;
     assert.match(recall, new RegExp(`No longer recalled[^\\n]*#${local.id}`));
     assert.match(recall, new RegExp(`Other project secret\\. #${hidden.id}`));
     assert.doesNotMatch(recall, new RegExp(`#${global.id}(?:\\n|$)`), "unchanged global recall is not repeated");
     await assert.rejects(execute({ action: "archive", id: local.id }), /not found/);
-    await execute({ action: "set_priority", id: global.id, priority: 2 });
     const replacement = await execute({ ...input, action: "supersede", id: global.id, text: "Check CLI dry-run output before writes." });
     assert.equal(replacement.scope, GLOBAL_SCOPE);
     assert.equal(store.get(GLOBAL_SCOPE, global.id).archived, true);
     assert.equal(store.get(GLOBAL_SCOPE, replacement.id).supersedes_id, global.id);
-    assert.equal(store.history(GLOBAL_SCOPE, global.id).events.some((entry) => entry.action === "set_priority"), true);
     await execute({ action: "archive", id: replacement.id });
     assert.equal(store.get(GLOBAL_SCOPE, replacement.id).archived, true);
     assert.equal(cards.length, 5, "global saves, replacements and archives produce chat cards");

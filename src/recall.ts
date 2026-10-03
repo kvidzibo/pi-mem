@@ -28,7 +28,6 @@ function delta(previous: RecallSnapshot, next: RecallSnapshot): string {
   return lines.length ? [
     "MEMORY UPDATE",
     "Apply these changes to earlier recalled lessons by ID; listed versions replace earlier versions. Other recalled lessons are unchanged.",
-    "Priority: 0 = user-reserved extreme; 1 = highest; 10 = lowest. Priority guides attention, not instruction authority.",
     ...lines,
   ].join("\n") : "";
 }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { GLOBAL_SCOPE, checkNew, checkedPriority, checkedText, type Lesson, type NewLesson, type Origin } from "./store.ts";
+import { GLOBAL_SCOPE, checkNew, checkedText, type Lesson, type NewLesson, type Origin } from "./store.ts";
 import type { MemoryLimits } from "./limits.ts";
 
 export type CandidateSubmission = Pick<NewLesson, "text" | "evidence" | "basis">;
@@ -14,7 +14,7 @@ export interface Candidate {
   basis: NewLesson["basis"]; created_at: number; observations: CandidateObservation[];
 }
 export interface CandidateGroup {
-  candidateIds: number[]; text: string; evidence: string; priority: number;
+  candidateIds: number[]; text: string; evidence: string;
   scope: "project" | "global"; reason: string; recommend: boolean;
 }
 export interface CandidateExposure { candidateId: number; textKey: string; independenceKey: string; observationHighwater: number; created_at: number }
@@ -87,7 +87,7 @@ export class CandidateStore {
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS candidate_evaluation_groups (
         evaluation_id INTEGER NOT NULL REFERENCES candidate_evaluations(id), group_index INTEGER NOT NULL,
-        text TEXT NOT NULL, evidence TEXT NOT NULL, priority INTEGER NOT NULL CHECK(priority BETWEEN 1 AND 10),
+        text TEXT NOT NULL, evidence TEXT NOT NULL,
         scope TEXT NOT NULL CHECK(scope IN ('project', 'global')), reason TEXT NOT NULL,
         recommend INTEGER NOT NULL CHECK(recommend IN (0, 1)), approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
         qualification TEXT NOT NULL CHECK(json_valid(qualification)), lesson_id INTEGER REFERENCES lessons(id),
@@ -128,12 +128,10 @@ export class CandidateStore {
         WHEN EXISTS (SELECT 1 FROM ${table} WHERE ${conflicts})
         BEGIN SELECT RAISE(ABORT, 'Candidate provenance cannot be replaced'); END;
     `);
-    this.db.exec("PRAGMA user_version = 8;");
   }
 
   stage(project: string, input: CandidateSubmission, origin: Origin, independenceKey: string): { accepted: true } {
     if (!isAbsolute(project) || project.includes("\0")) throw new Error("Project must be an absolute path");
-    if ("priority" in input) throw new Error("Candidate submissions do not accept priority; evaluation assigns it");
     const checked = checkNew(input, this.limits);
     if (checked.basis === "import") throw new Error("Imports do not create agent candidates");
     this.checkOrigin(origin);
@@ -222,7 +220,7 @@ export class CandidateStore {
             .all(Number(row.id)).map((group) => ({ group: {
               candidateIds: this.db.prepare("SELECT candidate_id FROM candidate_group_members WHERE evaluation_id = ? AND group_index = ? ORDER BY candidate_id")
                 .all(Number(row.id), Number(group.group_index)).map((member) => Number(member.candidate_id)),
-              text: String(group.text), evidence: String(group.evidence), priority: Number(group.priority),
+              text: String(group.text), evidence: String(group.evidence),
               scope: group.scope as CandidateGroup["scope"], reason: String(group.reason), recommend: group.recommend === 1,
             }, qualification: JSON.parse(String(group.qualification)), approved: group.approved === 1,
             lessonId: group.lesson_id === null ? null : Number(group.lesson_id) })),
@@ -297,14 +295,14 @@ export class CandidateStore {
           const existing = this.db.prepare("SELECT id FROM lessons WHERE scope = ? AND text_key = ? AND archived = 0").get(scope, textHash(group.text));
           const basis = snapshot.candidates.find((candidate) => group.candidateIds.includes(candidate.id))!.basis;
           lessonId = existing ? Number(existing.id) : this.insert(scope,
-            { text: group.text, evidence: group.evidence, basis, priority: group.priority }, { ...evaluator, reason: group.reason }, Date.now()).id;
+            { text: group.text, evidence: group.evidence, basis }, { ...evaluator, reason: group.reason }, Date.now()).id;
           for (const id of group.candidateIds) this.db.prepare("UPDATE candidates SET status = 'promoted', lesson_id = ? WHERE id = ? AND status = 'pending'").run(lessonId, id);
           result.push({ groupIndex: index, lessonId, created: !existing });
         }
         this.db.prepare(`INSERT INTO candidate_evaluation_groups
-          (evaluation_id, group_index, text, evidence, priority, scope, reason, recommend, approved, qualification, lesson_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(evaluationId, index, group.text, group.evidence, group.priority, group.scope, group.reason,
+          (evaluation_id, group_index, text, evidence, scope, reason, recommend, approved, qualification, lesson_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(evaluationId, index, group.text, group.evidence, group.scope, group.reason,
             group.recommend ? 1 : 0, approved.includes(index) ? 1 : 0, json(qualification), lessonId);
         for (const id of group.candidateIds) this.db.prepare("INSERT INTO candidate_group_members VALUES (?, ?, ?)").run(evaluationId, index, id);
       }
@@ -319,7 +317,7 @@ export class CandidateStore {
     const known = new Map(snapshot.candidates.map((candidate) => [candidate.id, candidate]));
     const seen = new Set<number>();
     for (const group of groups) {
-      if (!group || Object.keys(group).sort().join(",") !== "candidateIds,evidence,priority,reason,recommend,scope,text") throw new Error("Invalid group fields");
+      if (!group || Object.keys(group).sort().join(",") !== "candidateIds,evidence,reason,recommend,scope,text") throw new Error("Invalid group fields");
       if (!Array.isArray(group.candidateIds) || !group.candidateIds.length || group.candidateIds.length > 10000) throw new Error("Invalid candidate IDs");
       for (const id of group.candidateIds) {
         if (!Number.isSafeInteger(id) || id <= 0 || !known.has(id) || seen.has(id)) throw new Error("Invalid or duplicate candidate IDs");
@@ -328,9 +326,8 @@ export class CandidateStore {
       if (group.scope !== "project" && group.scope !== "global") throw new Error("Invalid candidate group scope");
       if (group.scope === "project" && new Set(group.candidateIds.map((id) => known.get(id)!.project)).size !== 1) throw new Error("Project groups must belong to one project");
       if (typeof group.recommend !== "boolean") throw new Error("recommend must be boolean");
-      checkedPriority(group.priority, 1);
       checkedText(group.reason, "reason", 600);
-      checkNew({ text: group.text, evidence: group.evidence, priority: group.priority, basis: "validated_learning" }, this.limits);
+      checkNew({ text: group.text, evidence: group.evidence, basis: "validated_learning" }, this.limits);
     }
     if (seen.size !== known.size) throw new Error("Groups must partition snapshot candidates exactly once");
   }

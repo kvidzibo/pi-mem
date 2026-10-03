@@ -77,9 +77,9 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     const emptyRecall = await event("context", { messages: [{ role: "user", content: "Initial check", timestamp: 0 }] });
     expectStatus(0, 0, emptyRecall.messages[0].content); // Empty recall still has framing overhead.
     const tool = extension.tools.get("memory").definition;
-    assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
+    assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "reason", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
@@ -89,22 +89,11 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     const saved = JSON.parse(notices.at(-1)!);
     assert.equal(saved.status, "saved");
     assert.equal(inspection.history(ctx.cwd, saved.id).events[0].actor, "user");
-    const reprioritized = JSON.parse((await execute({ action: "set_priority", id: saved.id, priority: 3,
-      reason: "Frequently recurring failure." })).content[0].text);
-    assert.equal(reprioritized.priority, 3);
-    const priorityEvent = inspection.history(ctx.cwd, saved.id).events.find((event) => event.reason === "Frequently recurring failure.");
-    assert.equal(priorityEvent?.model, "issuing-model");
-    await execute({ action: "set_priority", id: saved.id, priority: 5 });
-    assert.equal(savedEntries().length, 1, "priority changes must not create saved/archive chat cards");
     for (const id of [true, "00000000-0000-4000-8000-000000000001"]) {
       await assert.rejects(execute({ action: "archive", id }), /id must be a positive safe integer/);
     }
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
-    for (const priority of [0, 11, -1, 1.5, true, false, "1", null, [], {}]) {
-      await assert.rejects(execute({ action: "set_priority", id: saved.id, priority }), /priority must/);
-    }
-    await assert.rejects(execute({ action: "set_priority", id: saved.id, priority: undefined }), /priority must/);
     assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ · 🌱 0 \(\+0\) $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
@@ -252,11 +241,11 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     await command.handler("reload", ctx);
     await event("session_compact");
     const sqliteRecall = (await event("context", { messages: [user] })).messages[0].content;
-    assert.match(sqliteRecall, /^PROJECT LESSONS\nPriority: .*\nPriority guides .*\n- \[P5\] /);
+    assert.match(sqliteRecall, /^PROJECT LESSONS\n- /);
     assert.match(sqliteRecall, /\n\[1 lessons omitted\.\]$/);
     assert.doesNotMatch(sqliteRecall, /evidence|scope|loaded|total/);
     expectStatus(1, 2, sqliteRecall, 2); // Omitted lessons do not inflate token counts.
-    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: Buffer.byteLength(sqliteRecall) }));
+    writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallBytes: Math.max(64, Buffer.byteLength(sqliteRecall)) }));
     await command.handler("reload", ctx);
     await event("session_compact");
     const byteLimitedRecall = (await event("context", { messages: [user] })).messages[0].content;
@@ -283,25 +272,13 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     await command.handler(`archive ${successor.id}`, ctx);
     assert.equal(JSON.parse(notices.at(-1)!).changed, false);
     assert.match(statuses.at(-1)!, /\(\+4 -2\)/);
-    await command.handler("add --priority 0 Extreme human lesson.", ctx);
-    const extreme = JSON.parse(notices.at(-1)!);
-    assert.equal(inspection.get(ctx.cwd, extreme.id).priority, 0);
-    const extremeReplacement = JSON.parse((await execute({ ...input, action: "supersede", id: extreme.id,
-      text: "Corrected extreme lesson.", evidence: "Verified.", basis: "user_request", priority: 10 })).content[0].text);
-    assert.equal(extremeReplacement.priority, 0);
-    await assert.rejects(execute({ action: "set_priority", id: extremeReplacement.id, priority: 1, basis: "user_request" }), /user-reserved/);
-    await command.handler(`priority ${extremeReplacement.id} 7`, ctx);
-    assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
-    await command.handler(`priority ${extremeReplacement.id} false`, ctx);
-    assert.match(notices.at(-1)!, /Usage:/);
-    assert.equal(inspection.get(ctx.cwd, extremeReplacement.id).priority, 7);
     await command.handler("global add Global CLI lesson.", ctx);
     await command.handler("global add Another CLI lesson.", ctx);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ ...config, maxRecallLessons: 1 }));
     await command.handler("reload", ctx);
     const combined = (await event("context", { messages: [] })).messages[0].content;
     assert.match(combined, /^GLOBAL LESSONS[\s\S]*lessons omitted[\s\S]*PROJECT LESSONS[\s\S]*lessons omitted/);
-    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+8 -3) ~${formatTokens(Math.ceil(combined.length / 4))} · 🌱 0 (+0) \x1b[0m`,
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+6 -2) ~${formatTokens(Math.ceil(combined.length / 4))} · 🌱 0 (+0) \x1b[0m`,
       "footer splits loaded scopes, combines changes/tokens, and hides omission totals");
   } finally {
     await event("session_shutdown", { reason: "quit" });
@@ -342,12 +319,6 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     for (const scope of ["project", "global"]) assert.throws(() => tool.prepareArguments({ action: "add", scope,
       text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" }),
       /evaluation decides promotion scope/);
-    for (const priority of [1, 5, 10, undefined]) assert.throws(() => tool.prepareArguments({ action: "add", priority,
-      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" }),
-      /add does not accept priority/);
-    await assert.rejects(tool.execute("invalid-candidate-call", { action: "add", priority: 5,
-      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" },
-      undefined, undefined, ctx), /add does not accept priority/);
     const execute = async (text: string, session = "candidate-session") => {
       ctx.sessionManager.getSessionId = () => session;
       return tool.execute("candidate-call", tool.prepareArguments({ action: "add", text, evidence: "Reproduced with the integration fixture.",
@@ -369,8 +340,6 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     const candidate = snapshot.candidates[0];
     assert.equal(candidate.text, "Build assets before packaging.");
     assert.equal("requestedScope" in candidate, false, "candidate exports must not retain submission scope preferences");
-    assert.equal("priority" in candidate, false, "candidates are unscored until evaluation");
-    assert.equal(candidate.observations.some(observation => "priority" in observation), false);
     assert.equal(candidate.basis, "validated_learning");
     assert.equal(candidate.observations[0].origin.provider, "candidate-provider");
     assert.equal(candidate.observations[0].origin.model, "candidate-model");
@@ -379,7 +348,6 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
     assert.match(recalled.messages[0].content, /SESSION CANDIDATES[\s\S]*Build assets before packaging\. #C1/);
     assert.doesNotMatch(JSON.stringify(recalled.messages), /Reproduced with the integration fixture/);
-    assert.doesNotMatch(recalled.messages[0].content.split("SESSION CANDIDATES")[1], /\[P\d+\]/, "provisional recall must not invent a default priority");
     const prefix = structuredClone(recalled.messages);
     await execute("Cache-safe independent observation.");
     for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
@@ -401,9 +369,8 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     const evaluationId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent[0].content)![1]);
     const evaluator = extension.tools.get("memory_evaluate").definition;
     const validGroup = { candidateIds: store.candidateSnapshot().candidates.map((item) => item.id), text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.",
-      priority: 6, scope: "project", reason: "Independent validated observation.", recommend: false };
+      scope: "project", reason: "Independent validated observation.", recommend: false };
     assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, candidateIds: [true] }] }), /candidateIds|integer/);
-    assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, priority: true }] }), /priority|integer/);
     assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, recommend: "false" }] }), /recommend|boolean/);
     const prepared = evaluator.prepareArguments({ evaluationId, groups: [validGroup] });
     let reviewStep = 0;
@@ -503,21 +470,18 @@ test("real Pi loader: lesson changes append deltas without rewriting earlier req
     const added = add("New project lesson.");
     await next(/MEMORY UPDATE[\s\S]*New project lesson/);
     assert.doesNotMatch(request.at(-1).content, /Original project lesson|Global lesson\./, "unchanged lesson text must not be repeated");
-    db.setPriority(directory, original.id, 2, source);
-    await next(new RegExp(`\\[P2\\] Original project lesson\\. #${original.id}`));
     db.archive(GLOBAL_SCOPE, global.id);
     await next(new RegExp(`No longer recalled; disregard earlier recalled versions: #${global.id}`));
-    const replacement = db.supersede(directory, added.id, { text: "Replacement lesson.", evidence: "Verified.", basis: "user_request" }, source);
-    await next(new RegExp(`No longer recalled[^\\n]*#${added.id}[\\s\\S]*Replacement lesson\\. #${replacement.id}`));
+    const replacement = db.supersede(directory, added.id, { text: "Replacement lesson. Verify recoverable snapshots before changing shared database schemas.", evidence: "Verified.", basis: "user_request" }, source);
+    await next(new RegExp(`No longer recalled[^\\n]*#${added.id}[\\s\\S]*Replacement lesson\\.[^\\n]* #${replacement.id}`));
     db.moveLesson(directory, original.id, GLOBAL_SCOPE, source);
-    await next(/GLOBAL LESSONS\n- \[P2\] Original project lesson/);
+    await next(/GLOBAL LESSONS\n- Original project lesson/);
 
     // Reloading limits keeps the baseline, but withdraws IDs displaced by the new selection.
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ maxRecallBytes: 64 }));
     extension.runtime.sendMessage = () => {};
     await extension.commands.get("pi-mem").handler("reload", ctx);
     await next(/No longer recalled[\s\S]*Current recall status:[\s\S]*lessons omitted/);
-    assert.doesNotMatch(request.at(-1).content, /- \[P/);
     writeFileSync(join(directory, "pi-mem.json"), JSON.stringify({ maxRecallBytes: 0 }));
     await assert.rejects(extension.commands.get("pi-mem").handler("reload", ctx), /maxRecallBytes/);
     await next(/Project memory unavailable/);
@@ -579,6 +543,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const inputs: string[] = [];
   let extension: Awaited<ReturnType<typeof load>>;
   let observer: MemoryStore | undefined;
+  let uiFailure: unknown;
   const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
   const { KeybindingsManager } = await import(pathToFileURL(join(dist, "core/keybindings.js")).href);
   const keys = new KeybindingsManager({ "tui.select.confirm": "ctrl+y", "tui.select.cancel": "ctrl+x" });
@@ -589,12 +554,12 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       getBranch: () => extension.sessionLog.getBranch(), getLeafId: () => extension.sessionLog.getLeafId() },
     modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
     ui: {
-      notify: (text: string) => notices.push(text), setStatus: (_key: string, text?: string) => statuses.push(text),
+      notify: (text: string) => { if (uiFailure) throw uiFailure; notices.push(text); }, setStatus: (_key: string, text?: string) => statuses.push(text),
       setWidget: (_key: string, lines?: string[]) => widgets.push(lines),
       input: async () => { assert.ok(inputs.length, "unexpected input"); return inputs.shift(); },
       custom: async (factory: any) => {
         const step = steps.shift();
-        assert.ok(step, "unexpected custom UI");
+        if (!step) throw (uiFailure = new Error("unexpected custom UI"));
         let result: unknown;
         let finished = false;
         const tui = { terminal: { rows: 80 }, requestRender() {} };
@@ -636,7 +601,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           tui.terminal.rows = 80;
           component.invalidate();
           if (step.choice) {
-            for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && (/^\d+$/.test(step.choice!) ? line.slice(2).split(" —")[0].trim() === step.choice : line.includes(step.choice!))); count++) {
+            for (let count = 0; !screen().split("\n").some((line: string) => line.startsWith("→ ") && (step.choice === "Back" ? line.slice(2).trim() === "Back" : /^\d+$/.test(step.choice!) ? line.slice(2).split(" —")[0].trim() === step.choice : line.includes(step.choice!))); count++) {
               assert.ok(count < 1020, `choice ${step.choice} not found: ${screen()}`);
               component.handleInput(["Not recalled only", "Show all active lessons", "Next page", "Previous page", "Back"].includes(step.choice!) ? "\x1b[A" : "\x1b[B");
             }
@@ -645,7 +610,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
           if (!finished) component.handleInput(step.text !== undefined || step.submit ? "\r" : step.choice === undefined ? "\x18" : "\x19");
           assert.equal(finished, true, `UI did not close: ${step.title}`);
           return result;
-        } finally { component.dispose?.(); }
+        } catch (error) { uiFailure = error; throw error; }
+        finally { component.dispose?.(); }
       },
     },
   };
@@ -716,7 +682,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Browse / search", choice: "Show all active lessons", match: /1001–1001 of 1001/ },
       { title: "Browse / search", choice: "Next page", match: /1–1000 of 1002/ },
       { title: "Browse / search", search: "Seed 0.", beforeSearch: /1001–1002 of 1002[\s\S]*\[omitted\]/, choice: "Not recalled only", match: /Search: Seed 0\.[\s\S]*\[omitted\]/ },
-      { title: "Browse / search", choice: "Seed 0.", match: new RegExp(`Search: Seed 0\\.[\\s\\S]*Filter: Not recalled[\\s\\S]*#${original.id} · \\[P5\\] \\[omitted\\]`) },
+      { title: "Browse / search", choice: "Seed 0.", match: new RegExp(`Search: Seed 0\\.[\\s\\S]*Filter: Not recalled[\\s\\S]*#${original.id} · \\[omitted\\]`) },
       { title: "Lesson details", choice: "Replace…", match: /Evidence: Verified\.[\s\S]*Origin: test · session seed-session/ },
       { title: "Replace lesson", text: "Seed 0. Corrected.", match: /Project: .*project[\s\S]*2\/5 words/ },
       { title: "Review replacement", choice: "Cancel", match: /Project: .*project[\s\S]*BEFORE\nSeed 0\.\n\nAFTER\nSeed 0\. Corrected\./ },
@@ -735,18 +701,12 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·", choice: "Add lesson" },
       { title: "Add lesson", text: "These six words exceed the limit." },
       { title: "Add lesson", text: "New menu lesson." },
-      { title: "Review new lesson", choice: "Priority…", match: /Priority: 5/ },
-      { title: "Lesson priority", choice: "0 — Extreme" },
-      { title: "Review new lesson", choice: "Save", match: /Priority: 0/ },
+      { title: "Review new lesson", choice: "Save" },
       { title: "Memory ·", choice: "Browse / search lessons" },
-      { title: "Browse / search", choice: "New menu lesson.", match: /\[P0\]/ },
-      { title: "Lesson details", choice: "Change priority…", match: /Priority: 0/ },
-      { title: "Lesson priority", choice: "5" },
-      { title: "Lesson details", choice: "History", match: /Priority: 5/ },
-      { title: "History ·", choice: "Priority changed", match: /Retained changes only/ },
-      { title: "Activity ·", choice: "Back", match: /Priority changed: 0 → 5[\s\S]*Actor: user[\s\S]*Session: menu-session/ },
+      { title: "Browse / search", choice: "New menu lesson.", match: /New menu lesson\./ },
+      { title: "Lesson details", choice: "History", match: /New menu lesson/ },
       { title: "History ·", choice: "Back" },
-      { title: "Lesson details", choice: "Back", match: /Priority: 5/ },
+      { title: "Lesson details", choice: "Back" },
       { title: "Browse / search", choice: "Back" },
       { title: "Memory ·", choice: "Archived lessons" },
       { title: "Archived lessons", search: "Corrected", choice: "Seed 0. Corrected." },
@@ -778,9 +738,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "All projects", search: "~/foreign-missing-project-", choice: basename(foreignScope), match: /1 active \/ 0 archived/ },
       { title: "Project memories", choice: "Active lessons" },
       { title: "Browse / search", choice: foreign.text, match: /Other project/ },
-      { title: "Lesson details", choice: "Change priority…", match: /other project \(not recalled here\)/ },
-      { title: "Lesson priority", choice: "0 — Extreme", match: new RegExp(foreignScope) },
-      { title: "Lesson details", choice: "Archive", match: /Priority: 0/ },
+      { title: "Lesson details", choice: "Archive", match: /other project \(not recalled here\)/ },
       { title: "Archive lesson?", choice: "Cancel" },
       { title: "Lesson details", choice: "Archive" },
       { title: "Archive lesson?", choice: "Archive" },
@@ -788,7 +746,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Project memories", choice: "Archived lessons" },
       { title: "Archived lessons", choice: foreign.text },
       { title: "Lesson details", choice: "History", match: /archived \(not recalled\)/ },
-      { title: "History ·", choice: "Back", match: /Lesson archived[\s\S]*Priority changed/ },
+      { title: "History ·", choice: "Back", match: /Lesson archived/ },
       { title: "Lesson details", choice: "Back" },
       { title: "Archived lessons", choice: "Back" },
       { title: "Project memories", choice: "Back" },
@@ -796,7 +754,6 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·", match: /1002 active/ },
     );
     await run();
-    assert.equal(observer.get(foreignScope, foreign.id).priority, 0);
     assert.equal(observer.get(foreignScope, foreign.id).archived, true);
     assert.equal(ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-mem-archived").length, archiveCardsBefore);
 
@@ -824,7 +781,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await command.handler("reload", ctx);
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
-      { title: "Browse / search", choice: "Not recalled only", match: /byte budget reached[\s\S]*\[P5\] New menu lesson\.[\s\S]*\[omitted\] Seed/ },
+      { title: "Browse / search", choice: "Not recalled only", match: /byte budget reached[\s\S]*New menu lesson\.[\s\S]*\[omitted\] Seed/ },
       { title: "Browse / search", choice: observer.list(project, { limit: 2 }).lessons[1].text,
         match: /Filter: Not recalled[\s\S]*1–1000 of 1001/ },
       { title: "Lesson details", choice: "Back", match: /State: active · omitted by recall limits: byte budget reached/ },
@@ -936,7 +893,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.equal(observer.list(GLOBAL_SCOPE).total, 0);
 
     // Audit bypasses recall/output limits but requires an explicit destination and approval.
-    const globalAudit = observer.add(GLOBAL_SCOPE, { text: "Global audit lesson.", evidence: "Verified.", basis: "user_request", priority: 0 }, moveOrigin).lesson;
+    const globalAudit = observer.add(GLOBAL_SCOPE, { text: "Global audit lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     const foreignAudit = observer.add(foreignScope, { text: "Foreign audit lesson.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     const historyBeforeAudit = observer.history(project, original.id);
     const currentAudit = buildAudit(observer, project);
@@ -949,7 +906,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     steps.push({ title: "Memory ·", choice: "Audit…" },
       { title: "Audit memories — scope", choice: `Current project + global (~${currentTokens} tokens)`, match: /full audit text and metadata/ },
       { title: "Audit memories — output", choice: "Send to agent" },
-      { title: "Send audit to agent?", choice: "Cancel", match: /selected model[\s\S]*Priority 0/ },
+      { title: "Send audit to agent?", choice: "Cancel", match: /selected model[\s\S]*Archive retains records; it is not deletion/ },
       { title: "Memory ·" });
     await run();
     assert.equal(messages.length, 0);
@@ -990,7 +947,6 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await command.handler("audit --file", ctx);
     assert.match(notices.at(-1)!, /Usage:/);
     assert.deepEqual(observer.history(project, original.id), historyBeforeAudit);
-    assert.equal(observer.get(GLOBAL_SCOPE, globalAudit.id).priority, 0);
     assert.equal(observer.get(foreignScope, foreignAudit.id).archived, false);
 
     // Structured proposals, never Markdown parsing or unrestricted agent writes: all scopes share one approval.
@@ -1000,9 +956,6 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       proposal.execute("proposal", proposal.prepareArguments({ auditId, changes }), signal, undefined, ctx);
     for (const id of [true, {}, 1.5]) assert.throws(() => proposal.prepareArguments({ auditId: "test",
       changes: [{ id, action: "archive", reason: "Redundant" }] }), /id must/);
-    assert.throws(() => proposal.prepareArguments({ auditId: "test", changes: [
-      { id: foreignAudit.id, action: "set_priority", priority: true, reason: "Useful" }] }), /priority must/);
-    await assert.rejects(submit([{ id: globalAudit.id, action: "archive", reason: "Extreme" }]), /user-reserved/);
     const outside = observer.add(foreignScope, { text: "Created after audit.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     await assert.rejects(submit([{ id: outside.id, action: "archive", reason: "New" }]), /not in this audit/);
     const ordinaryTool = extension.tools.get("memory").definition;
@@ -1017,15 +970,13 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await assert.rejects(submit([{ id: foreignAudit.id, action: "archive", reason: "Other project" }]), /not in this audit/);
     await command.handler("audit --all-projects", ctx);
     const currentArchive = observer.add(project, { text: "Audit archive.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
-    const globalRank = observer.add(GLOBAL_SCOPE, { text: "Audit ranking.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     await command.handler("audit --all-projects", ctx);
-    steps.push({ title: "Review memory audit", choice: "Apply all", match: /3 changes: 1 archives · 1 priority changes · 1 moves to global[\s\S]*cannot be restored[\s\S]*Priority 5 → 3/ });
+    steps.push({ title: "Review memory audit", choice: "Apply all", match: /2 changes: 1 archives · 1 moves to global[\s\S]*cannot be restored/ });
     const archivesBeforeAudit = Number(/-(\d+)/.exec(statuses.at(-1) ?? "")?.[1] ?? 0);
     const applied = await submit([{ id: currentArchive.id, action: "archive", reason: "Low value" },
-      { id: globalRank.id, action: "set_priority", priority: 3, reason: "Recurring failures" },
       { id: foreignAudit.id, action: "move_global", reason: "Cross-project guidance" }]);
     assert.equal(applied.details.status, "applied");
-    assert.equal(applied.details.count, 3);
+    assert.equal(applied.details.count, 2);
     assert.equal(observer.get(project, currentArchive.id).archived, true);
     assert.equal(observer.history(project, currentArchive.id).events[0].action, "archive");
     const auditEntry = extension.sessionLog.getEntries().find((entry: SessionEntry): entry is CustomEntry =>
@@ -1042,12 +993,11 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await event("session_start");
     assert.match(statuses.at(-1)!, archiveCount);
     assert.equal(archiveRenderer(auditEntry, { expanded: false }, theme), undefined);
-    assert.equal(observer.get(GLOBAL_SCOPE, globalRank.id).priority, 3);
     assert.equal(observer.get(GLOBAL_SCOPE, foreignAudit.id).scope, GLOBAL_SCOPE);
     assert.equal(observer.history(GLOBAL_SCOPE, foreignAudit.id).events[0].actor, "user");
     const untouched = observer.add(project, { text: "Keep unchanged.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     await command.handler("audit", ctx);
-    steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { observer!.setPriority(project, untouched.id, 4, moveOrigin); } });
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { observer!.moveLesson(project, untouched.id, "/temporary-audit-scope", moveOrigin); observer!.moveLesson("/temporary-audit-scope", untouched.id, project, moveOrigin); } });
     await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Stale" }]), /stale/i);
     assert.equal(observer.get(project, untouched.id).archived, false);
     await command.handler("audit", ctx);
@@ -1065,7 +1015,6 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Compacted" }]), /branch changed/);
     await assert.rejects(blockedWrite(), /review pending/);
     assert.equal(observer.get(project, untouched.id).archived, false);
-    assert.equal(observer.get(GLOBAL_SCOPE, globalAudit.id).archived, false);
     await command.handler("audit", ctx);
     const abortProposal = new AbortController();
     steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { abortProposal.abort(new Error("proposal cancelled")); } });
@@ -1081,8 +1030,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     await assert.rejects(submit([], cancelledToken), /No matching pending audit/);
     await assert.rejects(blockedWrite(), /review pending/);
     await event("before_agent_start"); // A fresh user prompt, not an automatic continuation, releases the barrier.
-    assert.equal(JSON.parse((await ordinaryTool.execute("call", { action: "set_priority", id: globalRank.id, priority: 3,
-      basis: "user_request" }, undefined, undefined, ctx)).content[0].text).status, "priority updated");
+
     assert.equal(steps.length, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.

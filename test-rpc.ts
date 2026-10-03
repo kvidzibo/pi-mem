@@ -48,7 +48,6 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
   let browseRootSeen = false;
   let detailDone = false;
   let browseStage = 0;
-  let priorityChosen = false;
   let menuClosed: (() => void) | undefined;
   let adding = false;
   let inputOpened: (() => void) | undefined;
@@ -86,7 +85,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
           assert.ok(!event.options?.some((option) => option.includes("A verified lesson from the RPC smoke test")));
           value = "Show all active lessons";
         } else {
-          assert.ok(event.options?.some((option) => /^#\d+ · \[P5\]/.test(option) && option.includes("A verified lesson from the RPC smoke test")));
+          assert.ok(event.options?.some((option) => /^#\d+ · /.test(option) && option.includes("A verified lesson from the RPC smoke test")));
           value = event.options!.find((option) => option.includes("A verified lesson from the RPC smoke test"));
         }
       } else if (browseMenu && event.title?.startsWith("Lesson details")) {
@@ -94,18 +93,9 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
         assert.ok(event.title!.includes(`Project: ${project}`));
         assert.ok(event.options?.includes("Archive"));
         assert.ok(!event.options?.includes("Delete (archive)"));
-        if (!priorityChosen) value = "Change priority…";
-        else {
-          assert.match(event.title, /Priority: 3/);
-          detailDone = true;
-          client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
-          return;
-        }
-      } else if (browseMenu && event.title?.startsWith("Lesson priority")) {
-        assert.ok(event.title.includes(`Project: ${project}`));
-        assert.match(event.title, /Current priority: 5/);
-        value = "3";
-        priorityChosen = true;
+        detailDone = true;
+        client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n");
+        return;
       } else {
         value = event.options![0];
       }
@@ -152,7 +142,6 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     browseMenu = false;
     const messagesAfterBrowse = await client.getMessages();
     assert.deepEqual(messagesAfterBrowse, messagesBeforeBrowse, "browsing must not add messages");
-    assert.equal(JSON.parse(await command(`/pi-mem get ${saved.id}`)).priority, 3);
     assert.equal(events.filter((event) => event.type === "agent_start").length, 0);
     assert.match(events.find((event) => event.title?.startsWith("Lesson details"))?.title ?? "", /A verified lesson from the RPC smoke test/);
 
@@ -238,7 +227,6 @@ test("real offline audit tool asks once and applies all scopes only after RPC ap
   const source = { harness: "test", session: null, actor: "user" as const };
   const add = (scope: string, text: string) => store.add(scope, { text, evidence: "Verified", basis: "user_request" }, source).lesson;
   const archived = add(project, "Audit archive");
-  const ranked = add(GLOBAL_SCOPE, "Audit ranking");
   const moved = add(other, "Audit shared guidance");
   // Deterministic in-process provider: exercise Pi's real schema/execute pipeline, never call a network or live model.
   const provider = join(directory, "provider.ts");
@@ -263,9 +251,8 @@ export default function(pi) {
         seen.add(auditId); round++;
         const changes = round === 1 ? [
           { id: ${archived.id}, action: "archive", reason: "Low value" },
-          { id: ${ranked.id}, action: "set_priority", priority: 3, reason: "Recurring failures" },
           { id: ${moved.id}, action: "move_global", reason: "Cross-project guidance" }
-        ] : [{ id: ${ranked.id}, action: "set_priority", priority: round === 2 ? 4 : true, reason: "Review priority" }];
+        ] : [];
         const call = { type: "toolCall", id: "audit-call-" + round, name: "memory_audit", arguments: { auditId, changes } };
         message.content.push(call);
         stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
@@ -314,7 +301,7 @@ export default function(pi) {
     await client.start();
     const approved = await audit();
     const review = approved.find((event) => event.method === "select");
-    assert.match(review.title, /3 changes: 1 archives · 1 priority changes · 1 moves to global/);
+    assert.match(review.title, /2 changes: 1 archives · 1 moves to global/);
     assert.ok(review.title.includes(other));
     assert.match(review.title, /Cross-project guidance/);
     assert.equal(store.get(project, archived.id).archived, true);
@@ -323,20 +310,10 @@ export default function(pi) {
     assert.equal(archiveEntries[0].entry.data.audit, true, "audit archive markers are hidden by the TUI renderer");
     assert.ok(approved.some((event) => event.method === "setStatus" && /\(-1\)/.test(event.statusText)));
     assert.equal(store.history(project, archived.id).events[0].action, "archive");
-    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
     assert.equal(store.get(GLOBAL_SCOPE, moved.id).scope, GLOBAL_SCOPE);
     const history = store.history(GLOBAL_SCOPE, moved.id).events[0];
     assert.equal(history.actor, "user"); assert.equal(history.provider, "audit-test"); assert.equal(history.model, "audit");
     assert.ok(approved.some((event) => event.type === "tool_execution_end" && !event.isError && event.result.details.status === "applied"));
-    choice = "Cancel";
-    const declined = await audit();
-    assert.equal(declined.filter((event) => event.method === "select").length, 1);
-    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
-    assert.ok(declined.some((event) => event.type === "tool_execution_end" && event.result.details.status === "cancelled"));
-    const invalid = await audit();
-    assert.equal(invalid.filter((event) => event.method === "select").length, 0, "boolean priorities must fail before schema coercion and approval");
-    assert.ok(invalid.some((event) => event.type === "tool_execution_end" && event.isError && /priority must/.test(JSON.stringify(event.result))));
-    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
     assert.ok(!events.some((event) => event.type === "extension_error"), client.getStderr());
   } finally { await client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -371,7 +348,7 @@ export default function(pi) {
         const data = JSON.parse(text.split("\`\`\`json\\n")[1].split("\\n\`\`\`")[0]);
         call = { type: "toolCall", id: "evaluate-" + evaluationId, name: "memory_evaluate", arguments: { evaluationId, groups: [{
           candidateIds: data.candidates.map(c => c.id), text: "Back up SQLite before applying schema migrations.",
-          evidence: "Independent recovery checks verified database snapshots.", priority: 2, scope: "project",
+          evidence: "Independent recovery checks verified database snapshots.", scope: "project",
           reason: "Equivalent database precaution verified independently.", recommend: true }] } };
       } else if (!discovered && texts.some(s => s.includes("Record the independently verified migration precaution."))) {
         discovered = true;
