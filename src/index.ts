@@ -5,6 +5,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
+import { databaseCreatedNotice, selectDatabasePath } from "./database.ts";
 import { Backups, backupReport } from "./backups.ts";
 import { auditChanges, auditReview, buildAudit, stagedAudit, writeAudit } from "./audit.ts";
 import { menuChoice } from "./menu-ui.ts";
@@ -15,7 +16,7 @@ import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operati
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
-import { GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
+import { GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, SCHEMA_VERSION, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string; audit?: boolean };
@@ -74,8 +75,17 @@ export default function memoryExtension(pi: ExtensionAPI) {
     try {
       if (!state) {
         const scope = projectScope(ctx.cwd);
-        const { databasePath: path, ...limits } = memoryConfig(getAgentDir());
-        state = { store: new MemoryStore(path, limits), path, scope, cwd: ctx.cwd, limits };
+        const { databasePath: base, ...limits } = memoryConfig(getAgentDir());
+        const path = selectDatabasePath(base);
+        const store = new MemoryStore(path, limits);
+        state = { store, path, scope, cwd: ctx.cwd, limits };
+        if (store.initialized) {
+          let notice: string;
+          try { notice = databaseCreatedNotice(base, path); }
+          catch { notice = `Created memory database: ${JSON.stringify(path)}. Now using schema ${SCHEMA_VERSION}.\nPrevious database files could not be listed. Memories were not imported; manual migration may be needed.`; }
+          if (ctx.hasUI) ctx.ui.notify(notice, notice.includes("\nPrevious") ? "warning" : "info");
+          else console.error(notice);
+        }
       } else if (state.cwd !== ctx.cwd) {
         state.scope = projectScope(ctx.cwd);
         state.cwd = ctx.cwd;
@@ -158,12 +168,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function unavailable(error: unknown, ctx: ExtensionContext): string {
     const message = clipped(String(error instanceof Error ? error.message : error), 700);
+    const recovery = "/pi-mem reload retries after correcting the database path or file.";
     if (ctx.hasUI) {
       ctx.ui.setStatus("pi-mem", "\x1b[0m 🧠 unavailable \x1b[0m");
-      if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. /pi-mem reload retries.`, "warning");
+      if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. ${recovery}`, "warning");
     }
     notified = message;
-    return `Project memory unavailable: ${JSON.stringify(message)}. No SQLite lessons were loaded. /pi-mem reload retries.`;
+    return `Project memory unavailable: ${JSON.stringify(message)}. No SQLite lessons were loaded. ${recovery}`;
   }
 
   function show(value: unknown, ctx: ExtensionContext) {

@@ -12,7 +12,10 @@ in [`src/candidates.ts`](../src/candidates.ts). Those implementations are the
 source of truth; this document describes their public contract.
 
 `/pi-mem` commands and menus are **human interfaces, not agent tools**. Explicit
-human additions still create active lessons immediately.
+human additions still create active lessons immediately. Database selection is
+automatic and schema-versioned; configured `databasePath` and `PI_MEMORY_DB`
+values are base filenames. See [Database selection](../README.md#database-selection)
+for path resolution, schema 9 compatibility, and retained-store behavior.
 
 ## Common rules
 

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { Backups } from "./src/backups.ts";
+import { selectDatabasePath } from "./src/database.ts";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -171,7 +172,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.match(memoryStatus(), /^ 🧠 1\|0 \(\+1 -1\) ~/);
     assert.equal(saveCards().length, 2);
     await client.stop();
-    const backups = new Backups(env.PI_MEMORY_DB);
+    const backups = new Backups(selectDatabasePath(env.PI_MEMORY_DB));
     backups.configure({ frequency: "daily" });
     const startupReports = events.length;
     client = new RpcClient({ ...options, cwd: project });
@@ -188,7 +189,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     const archiveCards = () => events.filter((event) => event.type === "entry_appended" && event.entry?.customType === "pi-mem-archived");
     assert.equal(archiveCards().length, 1);
     assert.deepEqual(archiveCards()[0].entry!.data, { id: replacement.id, text: "A verified lesson from the RPC smoke test.",
-      scope: project, database: env.PI_MEMORY_DB, session: (await client.getState()).sessionId });
+      scope: project, database: selectDatabasePath(env.PI_MEMORY_DB), session: (await client.getState()).sessionId });
     assert.equal(JSON.parse(await command(`/pi-mem archive ${replacement.id}`)).changed, false);
     await command("/pi-mem reload");
     assert.match(memoryStatus(), /^ 🧠 0\|0 \(-1\) ~/);
