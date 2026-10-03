@@ -6,6 +6,7 @@ import type { SelectItem } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
 import { buildAudit, stagedAudit, writeAudit } from "./audit.ts";
+import { Backups, BACKUP_FREQUENCIES, backupFolder, backupReport, backupStatsText, type BackupFrequency } from "./backups.ts";
 import { clipped, formatTokens, globalRecallBytes, memoryContext, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { checkNew, DEFAULT_PRIORITY, GLOBAL_SCOPE, type Activity, type Lesson, type MemoryStore, type Origin } from "./store.ts";
@@ -431,6 +432,45 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     ctx.ui.notify(`Audit exported to ${JSON.stringify(written)}. No memories changed.`, "info");
   }
 
+  async function backups() {
+    const manager = new Backups(access.current().path);
+    let selected: string | undefined;
+    while (true) {
+      const settings = manager.settings();
+      const action = await choose("Backups", `Auto backup: ${settings.frequency}\nFolder: ${settings.folder}\nAll projects, global lessons, and history. Backups are never automatically deleted.`, [
+        item("frequency", "Auto backup…"), item("folder", "Backup folder…"), item("now", "Back up now"), item("stats", "Backup statistics"), BACK,
+      ], selected);
+      if (!action || action === "back") return;
+      selected = action;
+      try {
+        if (action === "frequency") {
+          const frequency = await choose("Auto backup", "Run at Pi startup when due. Local calendar periods; weeks start Monday.\nEnabling does not create a backup until the next startup; use Back up now for an immediate snapshot.",
+            [...BACKUP_FREQUENCIES.map((value) => item(value, value[0].toUpperCase() + value.slice(1))), CANCEL], settings.frequency);
+          if (frequency && frequency !== "cancel") manager.configure({ frequency: frequency as BackupFrequency });
+        } else if (action === "folder") {
+          const entered = await destinationInput(ctx, settings.folder, signal, "Backup folder — existing directory");
+          access.check();
+          if (entered === undefined) continue;
+          const folder = backupFolder(ctx.cwd, entered);
+          const confirmed = await choose("Change backup folder?", `New folder: ${folder}\nExisting backups stay where they are. Statistics and scheduling use the selected folder.`,
+            [CANCEL, item("save", "Use this folder")]);
+          if (confirmed === "save") manager.configure({ folder });
+        } else if (action === "now") {
+          ctx.ui.notify("Creating memory backup…", "info");
+          const info = await manager.create();
+          access.check();
+          if (info) {
+            let total: number | undefined;
+            try { total = manager.stats().bytes; } catch { /* The snapshot succeeded even if folder statistics fail. */ }
+            await choose("Backup created", backupReport(info, total), [BACK]);
+          }
+        } else if (action === "stats") {
+          await choose("Backup statistics", backupStatsText(manager.stats()), [BACK]);
+        }
+      } catch (error) { access.check(); reportError(error); }
+    }
+  }
+
   async function status() {
     const lines = [`Config: ${JSON.stringify(access.configPath)}`, `Pi cwd: ${JSON.stringify(ctx.cwd)}`];
     try {
@@ -468,7 +508,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("global", "Global lessons"), item("projects", "All projects"), item("audit", "Audit…"), item("move", "Move memory")] : []),
+        item("global", "Global lessons"), item("projects", "All projects"), item("audit", "Audit…"), item("move", "Move memory"), item("backups", "Backups…")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
@@ -482,6 +522,7 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       else if (action === "projects") await browseProjects();
       else if (action === "add") await saveLesson();
       else if (action === "move") await moveMemory();
+      else if (action === "backups") await backups();
       else if (action === "audit") {
         const result = await audit();
         if (result) return result;
