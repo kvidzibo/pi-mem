@@ -17,7 +17,7 @@ export function stagedEvaluation(snapshot: CandidateSnapshot, id: string, limits
     "Count independent discovery lineages, not retries, rewordings, forks or repetitions after exposure to any equivalent candidate. The extension enforces the numeric thresholds; recurrence does not prove truth.",
     `Propose text of at most ${limits.maxLessonWords} words and a concise evidence summary of at most ${limits.maxEvidenceWords} words. All original evidence, dates and origins remain available in the review and database.`,
     `Submit the complete structured proposal once through memory_evaluate with evaluationId ${JSON.stringify(id)} and groups: [{candidateIds, text, evidence, priority, scope, reason, recommend}].`,
-    "Choose promotion scope during this evaluation, not from submission preferences: project or global. Project groups must contain candidates from one project. priority is 1–10. recommend is true only when promotion is warranted; otherwise false.",
+    "Assign promotion scope and priority during this evaluation; submissions carry neither. Scope is project or global; project groups must contain candidates from one project. Priority is 1–10, based on consequence, recurrence and breadth. recommend is true only when promotion is warranted; otherwise false.",
     "Do not call memory, edit the database, or promote anything yourself. Pi will display each suggestion with Yes / No approval. Do not ask for approval in chat. No keeps candidates pending.",
     "This evaluation session is no longer an independent discoverer of disclosed lessons.", "",
     "```json", JSON.stringify(snapshot, null, 2), "```",

@@ -18,12 +18,12 @@ test("candidate isolation, lineage dedupe, qualification, retained decline and e
  const root=dir();t.after(()=>rmSync(root,{recursive:true,force:true}));const store=new MemoryStore(join(root,"db"));t.after(()=>store.close());
  store.stageCandidate("/p/a",lesson,origin("owner-a"),"lineage-a");
  store.stageCandidate("/p/a",lesson,origin("owner-a"),"lineage-a");
- store.stageCandidate("/p/a",{...lesson,evidence:"Owner B verified a separate clean run.",priority:7},origin("owner-b"),"lineage-b");
+ store.stageCandidate("/p/a",{...lesson,evidence:"Owner B verified a separate clean run."},origin("owner-b"),"lineage-b");
  store.stageCandidate("/p/a",{...lesson,evidence:"Fork repeated the same discovery."},origin("fork-a"),"lineage-a");
  assert.equal(store.ownCandidates("/p/a","owner-a")[0].observations.length,1);
  assert.equal(store.ownCandidates("/p/a","owner-b")[0].observations[0].wording,lesson.text);
  assert.equal(store.ownCandidates("/p/a","owner-b")[0].evidence,"Owner B verified a separate clean run.");
- assert.equal(store.ownCandidates("/p/a","owner-b")[0].priority,7);
+ assert.equal("priority" in store.ownCandidates("/p/a","owner-b")[0],false);
  assert.equal(store.ownCandidates("/p/a","fork-a")[0].evidence,"Fork repeated the same discovery.");
  assert.deepEqual(store.ownCandidates("/p/a","unrelated"),[]);
  assert.equal(store.candidateCounts().pending,1);
@@ -145,5 +145,5 @@ test("schema 7 upgrades atomically to candidate schema 8",t=>{
  legacy.exec("PRAGMA foreign_keys=OFF; DROP TABLE candidate_group_members; DROP TABLE candidate_evaluation_groups; DROP TABLE candidate_evaluations; DROP TABLE candidate_exposures; DROP TABLE candidate_observations; DROP TABLE candidates; DROP TABLE candidate_state; PRAGMA user_version=7");
  legacy.close();
  const upgraded=new MemoryStore(path);t.after(()=>upgraded.close());
- const check=new DatabaseSync(path);try{assert.equal(Number(check.prepare("PRAGMA user_version").get()!.user_version),8);assert.equal(check.prepare("SELECT count(*) n FROM lessons").get()!.n,1);assert.equal(check.prepare("SELECT count(*) n FROM candidates").get()!.n,0);assert.equal(check.prepare("PRAGMA table_info(candidates)").all().some(column=>column.name==="requested_scope"),false);}finally{check.close();}
+ const check=new DatabaseSync(path);try{assert.equal(Number(check.prepare("PRAGMA user_version").get()!.user_version),8);assert.equal(check.prepare("SELECT count(*) n FROM lessons").get()!.n,1);assert.equal(check.prepare("SELECT count(*) n FROM candidates").get()!.n,0);assert.equal(check.prepare("PRAGMA table_info(candidates)").all().some(column=>column.name==="requested_scope"||column.name==="priority"),false);assert.equal(check.prepare("PRAGMA table_info(candidate_observations)").all().some(column=>column.name==="priority"),false);}finally{check.close();}
 });

@@ -122,7 +122,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const owned = store.ownCandidates(scope, ctx.sessionManager.getSessionId());
     for (const candidate of owned) {
       const wording = (candidate.observations[0]?.wording ?? candidate.text).replace(/\s+/gu, " ").trim();
-      const line = `- [P${candidate.priority}] ${wording} #C${candidate.id}`;
+      const line = `- ${wording} #C${candidate.id}`;
       const bytes = Buffer.byteLength(line) + 1;
       if (provisional.length >= limits.maxRecallLessons || provisionalBytes + bytes > limits.maxRecallBytes) break;
       provisional.push({ id: `C${candidate.id}`, heading: provisionalHeading, line });
@@ -405,7 +405,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
-      "add and set_priority require priority, an integer from 1 (highest) to 10 (lowest). " +
+      "add accepts no scope or priority; evaluation assigns both at promotion. " +
+      "set_priority requires priority, an integer from 1 (highest) to 10 (lowest). " +
       "set_priority requires an active lesson id and changes only its priority; models cannot reprioritize priority 0. " +
       "reason optionally records why a change was made in the retained activity log. " +
       "Score future usefulness by consequence of ignoring the lesson, likelihood of recurrence, and breadth of applicability. " +
@@ -424,12 +425,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
       reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600 })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
       priority: Type.Optional(Type.Integer({ minimum: 1, maximum: 10,
-        description: "Required for add/set_priority; optional for supersede. 1 = highest priority, 10 = lowest. Zero is user-only." })),
+        description: "Required for set_priority; optional for supersede; forbidden for add. 1 = highest priority, 10 = lowest. Zero is user-only." })),
     }, { additionalProperties: false }),
     prepareArguments(args) {
       // Reject scope hints and coercible values before Pi schema validation.
       if (args && typeof args === "object") {
         if ("scope" in args) throw new Error("memory does not accept scope; evaluation decides promotion scope");
+        if ("action" in args && args.action === "add" && "priority" in args) throw new Error("add does not accept priority; evaluation assigns it at promotion");
         if ("priority" in args) checkedPriority(args.priority, 1);
         if ("id" in args && args.id != null) return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
       }
@@ -448,9 +450,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (params.basis !== "validated_learning" && params.basis !== "validated_fix" && params.basis !== "user_request") {
           throw new Error("add requires basis: validated_learning, validated_fix, or user_request");
         }
-        checkedPriority(params.priority, 1);
-        store.stageCandidate(scope, { text: params.text!, evidence: params.evidence!,
-          basis: params.basis, priority: params.priority }, { ...origin(ctx, _id), reason: params.reason }, independenceKey(ctx));
+        if ("priority" in params) throw new Error("add does not accept priority; evaluation assigns it at promotion");
+        store.stageCandidate(scope, { text: params.text!, evidence: params.evidence!, basis: params.basis }, { ...origin(ctx, _id), reason: params.reason }, independenceKey(ctx));
         result = { status: "candidate staged", message: "Provisional for this session only; evaluate candidates and approve promotion to share it." };
       } else result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);
       // Saving succeeded even if a later status/recall refresh fails; report the commit accurately.

@@ -82,7 +82,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
-    const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
+    const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
       /Maximum 20 words per lesson and 20 words for evidence/);
     await extension.commands.get("pi-mem").handler("add Test startup recall.", ctx);
@@ -102,9 +102,9 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     assert.equal(tool.prepareArguments({ action: "archive", id: `#${saved.id}` }).id, saved.id);
     assert.equal(inspection.get(ctx.cwd, saved.id).archived, false, "invalid IDs must not resolve to lesson #1");
     for (const priority of [0, 11, -1, 1.5, true, false, "1", null, [], {}]) {
-      await assert.rejects(execute({ ...input, priority }), /priority must/);
+      await assert.rejects(execute({ action: "set_priority", id: saved.id, priority }), /priority must/);
     }
-    await assert.rejects(execute({ ...input, priority: undefined }), /priority must/);
+    await assert.rejects(execute({ action: "set_priority", id: saved.id, priority: undefined }), /priority must/);
     assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ · 🌱 0 \(\+0\) $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
@@ -340,12 +340,18 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     assert.equal("scope" in tool.parameters.properties, false, "submitting agents must not choose promotion scope");
     assert.equal(tool.parameters.additionalProperties, false);
     for (const scope of ["project", "global"]) assert.throws(() => tool.prepareArguments({ action: "add", scope,
-      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning", priority: 6 }),
+      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" }),
       /evaluation decides promotion scope/);
+    for (const priority of [1, 5, 10, undefined]) assert.throws(() => tool.prepareArguments({ action: "add", priority,
+      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" }),
+      /add does not accept priority/);
+    await assert.rejects(tool.execute("invalid-candidate-call", { action: "add", priority: 5,
+      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning" },
+      undefined, undefined, ctx), /add does not accept priority/);
     const execute = async (text: string, session = "candidate-session") => {
       ctx.sessionManager.getSessionId = () => session;
       return tool.execute("candidate-call", tool.prepareArguments({ action: "add", text, evidence: "Reproduced with the integration fixture.",
-        basis: "validated_learning", priority: 6 }), undefined, undefined, ctx);
+        basis: "validated_learning" }), undefined, undefined, ctx);
     };
     ctx.hasUI = false;
     const first = JSON.parse((await execute("Build assets before packaging.")).content[0].text);
@@ -363,6 +369,8 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     const candidate = snapshot.candidates[0];
     assert.equal(candidate.text, "Build assets before packaging.");
     assert.equal("requestedScope" in candidate, false, "candidate exports must not retain submission scope preferences");
+    assert.equal("priority" in candidate, false, "candidates are unscored until evaluation");
+    assert.equal(candidate.observations.some(observation => "priority" in observation), false);
     assert.equal(candidate.basis, "validated_learning");
     assert.equal(candidate.observations[0].origin.provider, "candidate-provider");
     assert.equal(candidate.observations[0].origin.model, "candidate-model");
@@ -371,6 +379,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
     assert.match(recalled.messages[0].content, /SESSION CANDIDATES[\s\S]*Build assets before packaging\. #C1/);
     assert.doesNotMatch(JSON.stringify(recalled.messages), /Reproduced with the integration fixture/);
+    assert.doesNotMatch(recalled.messages[0].content.split("SESSION CANDIDATES")[1], /\[P\d+\]/, "provisional recall must not invent a default priority");
     const prefix = structuredClone(recalled.messages);
     await execute("Cache-safe independent observation.");
     for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
@@ -423,7 +432,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     for (const handler of extension.handlers.get("before_agent_start") ?? []) await handler({ systemPrompt: "Base" }, ctx);
     const foreign = join(directory, "other-project"); mkdirSync(foreign);
     for (const session of ["foreign-a", "foreign-b"]) store.stageCandidate(foreign,
-      { text: "Verify the foreign project's build configuration.", evidence: "Verified an independent build.", basis: "validated_fix", priority: 5 },
+      { text: "Verify the foreign project's build configuration.", evidence: "Verified an independent build.", basis: "validated_fix" },
       { harness: "test", session, actor: "model" }, session);
     await extension.commands.get("pi-mem").handler("evaluate", ctx);
     const foreignEvaluationId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent.at(-1)!.content)![1]);

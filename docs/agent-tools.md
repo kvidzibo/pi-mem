@@ -26,8 +26,8 @@ human additions still create active lessons immediately.
   at most **600 characters**. Both also obey configured word limits (default
   **20 words each**). A supplied `reason` is nonblank, at most **600 characters**.
   Forbidden control characters are rejected.
-- Model-assigned priorities are integers **1–10**: 1 highest, 10 lowest. Priority
-  guides attention, not instruction authority; **0** is reserved for humans.
+- Priorities on active lessons are integers **1–10**: 1 highest, 10 lowest.
+  Priority guides attention, not instruction authority; **0** is reserved for humans.
 - No secrets or raw transcripts. Origins, timestamps, project roots, and
   discovery-lineage metadata are captured by the extension, not supplied by the
   submitting agent.
@@ -52,20 +52,27 @@ interface MemoryRequest {
 }
 ```
 
-Fields other than `action` are schema-optional; the handler enforces these
+The runtime uses a flat root object with a common optional `priority` for
+`supersede` and `set_priority`. `add` must omit it: both preparation and execution
+reject supplied priority, even explicit `undefined`. The handler enforces these
 conditional requirements:
 
 | Action | Required fields beyond `action` | Effect |
 |---|---|---|
-| `add` | `text`, `evidence`, `basis`, `priority` | Stage a private candidate; no shared lesson is created |
+| `add` | `text`, `evidence`, `basis` | Stage a private candidate; no shared lesson or priority score is created |
 | `supersede` | `id`, `text`, `evidence`, `basis` | Atomically create a linked replacement and archive the predecessor |
 | `archive` | `id` | Exclude a retained lesson from recall; repeating an archive is a no-op |
 | `set_priority` | `id`, `priority` | Change an active lesson's priority without replacing its content |
 
-`reason` is optional for every action. `supersede` inherits priority unless
-supplied, and always preserves a predecessor's priority 0. Models cannot
-reprioritize priority-0 lessons. ID-based actions resolve and retain the existing
-current-project or global scope; other-project IDs are inaccessible.
+`priority` is optional for `supersede` (otherwise inherited) and required for
+`set_priority`; where valid it must be an integer **1–10**. `reason` is optional
+for every action. `add` accepts neither `scope` nor `priority`; there is no default
+or stored candidate priority. Project and session context are captured automatically. New-lesson priority is
+proposed during evaluation, not submission; promotion still requires user
+approval. `supersede` inherits priority unless supplied, and always preserves a
+predecessor's priority 0. Models cannot reprioritize priority-0 lessons. ID-based
+actions resolve and retain the existing current-project or global scope;
+other-project IDs are inaccessible.
 
 A candidate is recalled only in its originating session/project. Pending
 identity is originating project + normalized wording; retries from one session
@@ -97,8 +104,7 @@ result has no `status` field. An inherited priority can be 0.
   "action": "add",
   "text": "Back up SQLite before applying schema migrations.",
   "evidence": "Verified recovery from a database snapshot.",
-  "basis": "validated_fix",
-  "priority": 2
+  "basis": "validated_fix"
 }
 ```
 
@@ -198,6 +204,9 @@ type MemoryEvaluateResult =
       candidates: { pending: number; sinceEvaluation: number } };
 ```
 
-`groupIndex` is zero-based. `created: false` means an exact active duplicate was
-reused without changing its priority. Evaluation results may contain pool counts;
+`groupIndex` is zero-based. Each evaluated group proposes its priority (integer
+1–10) and promotion scope; an approved promotion creates or reuses an active
+lesson. Existing active duplicates retain their priority, including inherited
+priority 0. `created: false` means an exact active duplicate was reused without
+changing its priority. Evaluation results may contain pool counts;
 ordinary submitting agents never receive them in submission acknowledgements.

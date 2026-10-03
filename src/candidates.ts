@@ -4,13 +4,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { GLOBAL_SCOPE, checkNew, checkedPriority, checkedText, type Lesson, type NewLesson, type Origin } from "./store.ts";
 import type { MemoryLimits } from "./limits.ts";
 
+export type CandidateSubmission = Pick<NewLesson, "text" | "evidence" | "basis">;
 export interface CandidateObservation {
-  id: number; wording: string; evidence: string; priority: number; basis: NewLesson["basis"];
+  id: number; wording: string; evidence: string; basis: NewLesson["basis"];
   origin: Origin; created_at: number; independenceKey: string; exposed: boolean;
 }
 export interface Candidate {
   id: number; project: string; text: string; evidence: string;
-  priority: number; basis: NewLesson["basis"]; created_at: number; observations: CandidateObservation[];
+  basis: NewLesson["basis"]; created_at: number; observations: CandidateObservation[];
 }
 export interface CandidateGroup {
   candidateIds: number[]; text: string; evidence: string; priority: number;
@@ -61,7 +62,6 @@ export class CandidateStore {
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
         project TEXT NOT NULL,
         text TEXT NOT NULL, text_key TEXT NOT NULL, evidence TEXT NOT NULL,
-        priority INTEGER NOT NULL CHECK(priority BETWEEN 1 AND 10),
         basis TEXT NOT NULL CHECK(basis IN ('validated_learning', 'validated_fix', 'user_request')),
         created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'promoted')),
         lesson_id INTEGER REFERENCES lessons(id), CHECK((status = 'pending') = (lesson_id IS NULL))
@@ -71,7 +71,7 @@ export class CandidateStore {
       CREATE TABLE IF NOT EXISTS candidate_observations (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
         candidate_id INTEGER NOT NULL REFERENCES candidates(id), wording TEXT NOT NULL, evidence TEXT NOT NULL,
-        priority INTEGER NOT NULL CHECK(priority BETWEEN 1 AND 10), basis TEXT NOT NULL,
+        basis TEXT NOT NULL,
         origin TEXT NOT NULL CHECK(json_valid(origin)), owner_key TEXT NOT NULL,
         created_at INTEGER NOT NULL, independence_key TEXT NOT NULL,
         UNIQUE(candidate_id, owner_key)
@@ -100,7 +100,7 @@ export class CandidateStore {
         FOREIGN KEY(evaluation_id, group_index) REFERENCES candidate_evaluation_groups(evaluation_id, group_index)
       ) WITHOUT ROWID;
       CREATE TRIGGER IF NOT EXISTS candidates_immutable BEFORE UPDATE OF
-        id, project, text, text_key, evidence, priority, basis, created_at ON candidates
+        id, project, text, text_key, evidence, basis, created_at ON candidates
         BEGIN SELECT RAISE(ABORT, 'Candidate content is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS candidates_promotion_only BEFORE UPDATE OF status, lesson_id ON candidates
         WHEN OLD.status != 'pending' OR NEW.status != 'promoted' OR NEW.lesson_id IS NULL
@@ -131,9 +131,9 @@ export class CandidateStore {
     this.db.exec("PRAGMA user_version = 8;");
   }
 
-  stage(project: string, input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
+  stage(project: string, input: CandidateSubmission, origin: Origin, independenceKey: string): { accepted: true } {
     if (!isAbsolute(project) || project.includes("\0")) throw new Error("Project must be an absolute path");
-    checkedPriority(input.priority ?? 5, 1);
+    if ("priority" in input) throw new Error("Candidate submissions do not accept priority; evaluation assigns it");
     const checked = checkNew(input, this.limits);
     if (checked.basis === "import") throw new Error("Imports do not create agent candidates");
     this.checkOrigin(origin);
@@ -144,14 +144,14 @@ export class CandidateStore {
       const id = existing ? Number(existing.id) : nextId(this.db, "candidates");
       const now = Date.now();
       if (!existing) this.db.prepare(`INSERT INTO candidates
-        (id, project, text, text_key, evidence, priority, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, project, checked.text, textHash(checked.text), checked.evidence, checked.priority ?? 5, checked.basis, now);
+        (id, project, text, text_key, evidence, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, project, checked.text, textHash(checked.text), checked.evidence, checked.basis, now);
       const owner = json([origin.harness, origin.session ?? independenceKey]);
       if (this.db.prepare("SELECT 1 FROM candidate_observations WHERE candidate_id = ? AND owner_key = ?").get(id, owner)) return;
       this.db.prepare(`INSERT INTO candidate_observations
-        (id, candidate_id, wording, evidence, priority, basis, origin, owner_key, created_at, independence_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(nextId(this.db, "candidate_observations"), id, checked.text, checked.evidence, checked.priority ?? 5,
+        (id, candidate_id, wording, evidence, basis, origin, owner_key, created_at, independence_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(nextId(this.db, "candidate_observations"), id, checked.text, checked.evidence,
           checked.basis, json(origin), owner, now, independenceKey);
       // Entirely new candidates may arrive during review; additions to a reviewed candidate make its snapshot stale.
       if (existing) this.bumpMarker();
@@ -177,7 +177,7 @@ export class CandidateStore {
       const own = session === undefined ? undefined : observations[0];
       return { id: Number(row.id), project: String(row.project),
         text: own?.wording ?? String(row.text), evidence: own?.evidence ?? String(row.evidence),
-        priority: own?.priority ?? Number(row.priority), basis: own?.basis ?? row.basis as NewLesson["basis"],
+        basis: own?.basis ?? row.basis as NewLesson["basis"],
         created_at: own?.created_at ?? Number(row.created_at), observations };
     });
   }
@@ -188,7 +188,7 @@ export class CandidateStore {
     const exposure = this.db.prepare(`SELECT min(e.observation_highwater) AS observation_highwater FROM candidate_exposures e
       JOIN candidates disclosed ON disclosed.id = e.candidate_id JOIN candidates current ON current.id = ?
       WHERE disclosed.text_key = current.text_key AND e.independence_key = ?`).get(Number(row.candidate_id), independenceKey);
-    return { id, wording: String(row.wording), evidence: String(row.evidence), priority: Number(row.priority),
+    return { id, wording: String(row.wording), evidence: String(row.evidence),
       basis: row.basis as NewLesson["basis"], origin: JSON.parse(String(row.origin)), created_at: Number(row.created_at),
       independenceKey, exposed: exposure?.observation_highwater != null && id > Number(exposure.observation_highwater) };
   }

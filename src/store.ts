@@ -3,7 +3,7 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_LIMITS, memoryLimits, type MemoryLimits } from "./limits.ts";
-import { CandidateStore, type Candidate, type CandidateGroup, type CandidateSnapshot } from "./candidates.ts";
+import { CandidateStore, type Candidate, type CandidateGroup, type CandidateSnapshot, type CandidateSubmission } from "./candidates.ts";
 
 export const MAX_TEXT = 1200;
 export const MAX_EVIDENCE = 600;
@@ -373,7 +373,7 @@ export class MemoryStore {
     return this.get(scope, id);
   }
 
-  stageCandidate(project: string, input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
+  stageCandidate(project: string, input: CandidateSubmission, origin: Origin, independenceKey: string): { accepted: true } {
     return this.candidatesStore.stage(project, input, origin, independenceKey);
   }
   ownCandidates(project: string, session: string): Candidate[] { return this.candidatesStore.own(project, session); }

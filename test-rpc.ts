@@ -347,7 +347,7 @@ test("real offline candidate tools preserve blind submissions and require indivi
   const database = join(directory, "lessons.sqlite3");
   const store = new MemoryStore(database);
   store.stageCandidate(project, { text: "Back up SQLite before schema migrations.", evidence: "Verified recovery from a database snapshot.",
-    basis: "validated_fix", priority: 2 }, { harness: "test", session: "independent-peer", actor: "model" }, "independent-peer");
+    basis: "validated_fix" }, { harness: "test", session: "independent-peer", actor: "model" }, "independent-peer");
   const provider = join(directory, "provider.ts");
   writeFileSync(provider, `import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function(pi) {
@@ -377,7 +377,7 @@ export default function(pi) {
         discovered = true;
         call = { type: "toolCall", id: "candidate-discovery", name: "memory", arguments: { action: "add",
           text: "Snapshot SQLite before applying migrations.", evidence: "Verified restoring the database after migration failure.",
-          basis: "validated_fix", priority: 2 } };
+          basis: "validated_fix" } };
       }
       if (call) {
         message.content.push(call); stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });

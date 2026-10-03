@@ -32,7 +32,7 @@ test("global lessons follow sessions across projects without exposing other proj
   };
   const tool = extension.tools.get("memory").definition;
   const execute = async (params: object) => (await tool.execute("call", tool.prepareArguments(params), undefined, undefined, ctx)).details;
-  const input = { action: "add", text: "Use CLI dry runs before writes.", evidence: "Verified CLI behavior.", basis: "validated_learning", priority: 3 };
+  const input = { action: "add", text: "Use CLI dry runs before writes.", evidence: "Verified CLI behavior.", basis: "validated_learning" };
   let store: MemoryStore | undefined;
   let report: any;
   loaded.runtime.sendMessage = (message: { content: string }) => { report = JSON.parse(message.content); };

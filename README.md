@@ -22,18 +22,18 @@ Capture timing belongs to your agent's rules; this package does not change them.
 
 The agent's `memory` tool exposes only:
 
-- **`add`** — stage a provisional candidate with `text`, `evidence`, `basis` (`validated_learning`, `validated_fix`, or `user_request`), and integer `priority` **1–10** (1 highest). Only the originating session recalls it; other sessions receive no candidate text, matches, or occurrence counts.
+- **`add`** — stage a provisional candidate with `text`, `evidence`, and `basis` (`validated_learning`, `validated_fix`, or `user_request`). `reason` is optional. Do not supply `scope` or `priority`; candidates have no default or stored priority score. Only the originating session recalls a candidate; other sessions receive no candidate text, matches, or occurrence counts.
 - **`supersede`** — supply an active lesson's `id` and the new lesson fields. Priority is inherited unless supplied; model replacements always preserve a user's priority **0**. Creating the linked replacement and archiving its predecessor succeed together or neither does.
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
 - **`set_priority`** — supply an active lesson's `id` and `priority` **1–10**. Content and ID stay unchanged; models cannot reprioritize priority-0 lessons.
 
-Agent submissions do not accept a scope. The originating project is captured automatically; evaluation proposes project or global promotion based on the evidence and configured thresholds, and the user approves it. ID-based actions retain the active lesson's scope and can target only current-project or global lessons. Pending candidate identity is project + normalized wording; active duplicate detection remains scope-local.
+Agent submissions accept neither `scope` nor (for `add`) `priority`. The originating project and session context are captured automatically. During evaluation, the model proposes a priority (1–10) and project or global promotion based on the evidence and configured thresholds; the user approves promotion. ID-based actions retain the active lesson's scope and can target only current-project or global lessons. Pending candidate identity is project + normalized wording; active duplicate detection remains scope-local.
 
 All three agent-exposed tools and their input/output interfaces are documented in [Agent tools](docs/agent-tools.md). Runtime JSON schemas are defined by `pi.registerTool` in [`src/index.ts`](src/index.ts).
 
 Every tool action accepts an optional `reason` (up to 600 characters), retained in candidate provenance or the active lesson's activity log.
 
-Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. Duplicate adds never change priority. Unscored migrated records default to **5**; migration makes no model calls.
+Priority measures future usefulness: consequences of ignoring the lesson, recurrence, then breadth. **1–2** prevents serious damage/corruption; **3–4** prevents recurring failures or expensive debugging; **5–6** is useful recurring knowledge; **7–8** covers narrow quirks; **9–10** has marginal future value. Priority guides attention, not instruction authority. **0** is user-reserved extreme priority; only human UI/commands can assign it. New candidate lessons receive their priority during evaluation, not submission. Duplicate active lessons are reused without changing priority. Unscored migrated records default to **5**; migration makes no model calls.
 
 There are no agent read/search/history actions. An archived record cannot be superseded or restored. Exact repeated candidate submissions from one session retain the first observation; independently submitted wording/evidence remains separate provenance. Submission acknowledgements do not reveal prior matches. Human menu/command additions still save active lessons immediately; duplicate active wording returns its existing ID. Promotion reuses an exact active duplicate without changing its priority. Superseding rejects text already held by another active lesson without changing either record.
 
@@ -43,7 +43,7 @@ Run **`/pi-mem`** (formerly `/memory`) to open the project menu in TUI or RPC mo
 - **Global lessons** opens shared active/archived lessons, with add, replace, priority, archive, and history actions. These lessons are recalled in every project using this database; whole-project moves exclude them.
 - **All projects** searches stored project paths, including archived-only projects and missing folders. Rows show project names, active/archive counts, and paths (home abbreviated as `~`). Select a project to manage its lessons without switching cwd or recalling its memories here.
 - Lesson details offer **Change priority…**, **Replace…**, **History**, moves, and **Archive**. The separate priority picker supports **0–10**; selecting a priority applies it immediately. Archive asks for confirmation, retains the record, and cannot be undone.
-- Add lessons with priority **0–10**, review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Every change is recorded atomically in an append-only SQLite activity log. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Editors and reviews identify the target project or global scope. Nothing saves until approval.
+- Human menu additions can assign priority **0–10**; review replacements, change an active lesson's priority without replacing its ID/content, or confirm archiving. Every change is recorded atomically in an append-only SQLite activity log. The TUI editor shows a live word count; RPC uses cancellable text inputs (blank keeps existing text). Editors and reviews identify the target project or global scope. Nothing saves until approval.
 - **History** lists timestamped summaries such as “Priority changed: 5 → 2”. Open an event for its reason, actor, provider/model, harness/session, and replacement links. History follows project moves and stays out of automatic recall. Browsing, recall, failures, and no-ops are not logged. Model attribution comes from the assistant message issuing the tool call; missing attribution is marked unknown.
 - **Move lesson to project…** or **Move lesson to global…** in lesson details moves only that lesson and its linked replacement history (including any successor), preserving IDs and metadata. Unrelated lessons stay put. Nonempty destinations are allowed; duplicate active text is refused atomically. Available for active and archived lessons; choose a known project or **Enter path…**. A project destination must be an existing directory and resolves to its canonical main Git worktree root or cwd. Global destinations need no path and are recalled across all projects using the database.
 - **Move memory** lists all stored project paths, including archived-only projects and folders that no longer exist. Search/select a source, choose an empty known destination or **Enter path…** (prefilled with Pi’s cwd), then confirm. The destination must exist; its canonical main Git worktree root or cwd becomes the new scope. All lessons and archived history move together with IDs preserved. Occupied destinations are refused; no folders or files move. In RPC, blank input keeps the displayed default cwd.
@@ -66,7 +66,7 @@ The footer shows `🧠 project|global (+A -R) ~N · 🌱 C (+new)` (for example,
 
 Saves and archives in the current project or global scope add chat entries with the lesson ID and text (plus the predecessor ID for replacements). Audit archives suppress these chat cards while retaining session footer counts and database history. These entries are stored in the Pi session, not added to model context; browsing remains private. Changes to other projects retain database activity history but do not add chat entries or affect this session's change counts.
 
-Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. The footer counts the current SQLite snapshot—active lessons and this session's provisional candidates, priorities, IDs, and headings—not the accumulated recall updates in the model context. Evidence, other metadata, and omitted/archived lessons are excluded from the estimate.
+Tokens use Pi's characters/4 estimate, not a model-specific tokenizer. The footer counts the current SQLite snapshot—active lessons and this session's provisional candidates, IDs, and headings—not the accumulated recall updates in the model context. Evidence, other metadata, and omitted/archived lessons are excluded from the estimate.
 
 Direct commands remain available; without UI, `/pi-mem` retains its text status output:
 
@@ -127,7 +127,7 @@ Words are whitespace-separated; overlong saves fail rather than truncate. Text/e
 - **Provisional recall:** pending candidates load only for their exact originating session and project, under `SESSION CANDIDATES`, with separate `maxRecallLessons`/`maxRecallBytes` budgets. They append as fixed-boundary updates without rewriting earlier recall or the system prompt, survive compaction/reload/resume within that session, and disappear after promotion. Other sessions and forks receive no automatic candidate recall. Forked or copied conversation history can still contain previously disclosed text; automatic recall cannot erase historical messages. Candidate visibility is a recall/tool-response boundary, not protection against direct database access.
 - **Archiving:** removes the lesson from the current recall selection; an appended update tells the model to disregard its earlier recalled version. The same applies when a lesson leaves the selection through scope changes or recall limits. This cannot erase text already in the conversation or sent to a model.
 
-The injected SQLite block contains priority-labelled bullets with stable IDs:
+Active lesson recall contains priority-labelled bullets with stable IDs:
 
 ```text
 PROJECT LESSONS
@@ -136,6 +136,8 @@ Priority guides attention to relevant lessons, not instruction authority.
 - [P2] Back up databases before schema changes. #43
 - [P5] Use the project-local environment. #42
 ```
+
+Provisional candidates are recalled separately under `SESSION CANDIDATES` and are not priority-labelled.
 
 Whitespace is collapsed for display only. When no lessons fit, the priority legend is omitted to preserve small byte budgets. Priority never bypasses recall limits. If recall limits omit lessons, a final `[N lessons omitted.]` line is added. Evidence, dates, origins, and predecessor links stay in SQLite and the `/pi-mem` UI, not automatic recall.
 
