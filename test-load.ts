@@ -39,6 +39,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     cwd: join(directory, "project"), hasUI: true, mode: "rpc",
     sessionManager: { getSessionId: () => "load-session", getSessionFile: (): string | undefined => "/temporary/session.jsonl",
       getEntries: (): SessionEntry[] => extension.sessionLog.getEntries(),
+      getLeafId: () => extension.sessionLog.getLeafId(),
       getBranch: () => [{ type: "message", message: { role: "assistant", provider: "test-provider", model: "issuing-model",
         content: [{ type: "toolCall", id: "call", name: "memory", arguments: {} }] } }] },
     ui: {
@@ -65,7 +66,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
   };
   try {
     extension = await load();
-    assert.deepEqual([...extension.tools.keys()], ["memory"]);
+    assert.deepEqual([...extension.tools.keys()], ["memory", "memory_audit"]);
     assert.deepEqual([...extension.commands.keys()], ["pi-mem"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
@@ -426,7 +427,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const ctx = {
     cwd: project, hasUI: true, mode: "tui",
     sessionManager: { getSessionId: () => "menu-session", getSessionFile: () => undefined,
-      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries() },
+      getEntries: (): SessionEntry[] => extension.sessionLog.getEntries(),
+      getBranch: () => extension.sessionLog.getBranch(), getLeafId: () => extension.sessionLog.getLeafId() },
     modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
     ui: {
       notify: (text: string) => notices.push(text), setStatus() {},
@@ -780,7 +782,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.match(messages.at(-1)!.content, /Foreign audit lesson/);
     const directFile = join(project, "direct audit.md");
     await command.handler("audit --file direct audit.md", ctx);
-    assert.equal(readFileSync(directFile, "utf8"), messages[0].content);
+    assert.equal(readFileSync(directFile, "utf8"), buildAudit(observer, project));
+    assert.doesNotMatch(readFileSync(directFile, "utf8"), /Submit the complete proposal/);
     await command.handler("audit --file direct audit.md", ctx);
     assert.match(notices.at(-1)!, /EEXIST/);
     await command.handler("audit --file", ctx);
@@ -788,6 +791,66 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     assert.deepEqual(observer.history(project, original.id), historyBeforeAudit);
     assert.equal(observer.get(GLOBAL_SCOPE, globalAudit.id).priority, 0);
     assert.equal(observer.get(foreignScope, foreignAudit.id).archived, false);
+
+    // Structured proposals, never Markdown parsing or unrestricted agent writes: all scopes share one approval.
+    const proposal = extension.tools.get("memory_audit").definition;
+    const proposalId = () => JSON.parse(/with auditId ("[^"]+")/.exec(messages.at(-1)!.content)![1]);
+    const submit = (changes: object[], auditId = proposalId(), signal?: AbortSignal) =>
+      proposal.execute("proposal", proposal.prepareArguments({ auditId, changes }), signal, undefined, ctx);
+    for (const id of [true, {}, 1.5]) assert.throws(() => proposal.prepareArguments({ auditId: "test",
+      changes: [{ id, action: "archive", reason: "Redundant" }] }), /id must/);
+    assert.throws(() => proposal.prepareArguments({ auditId: "test", changes: [
+      { id: foreignAudit.id, action: "set_priority", priority: true, reason: "Useful" }] }), /priority must/);
+    await assert.rejects(submit([{ id: globalAudit.id, action: "archive", reason: "Extreme" }]), /user-reserved/);
+    const outside = observer.add(foreignScope, { text: "Created after audit.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    await assert.rejects(submit([{ id: outside.id, action: "archive", reason: "New" }]), /not in this audit/);
+    const ordinaryTool = extension.tools.get("memory").definition;
+    await assert.rejects(ordinaryTool.execute("call", { action: "archive", id: globalAudit.id }, undefined, undefined, ctx), /review pending/);
+    const oldToken = proposalId();
+    steps.push({ title: "Review memory audit", choice: "Cancel", match: /1 changes[\s\S]*Foreign audit lesson[\s\S]*Reason: Low value/ });
+    assert.equal((await submit([{ id: foreignAudit.id, action: "archive", reason: "Low value" }])).details.status, "cancelled");
+    assert.equal(observer.get(foreignScope, foreignAudit.id).archived, false);
+    await assert.rejects(ordinaryTool.execute("call", { action: "archive", id: globalAudit.id }, undefined, undefined, ctx), /review pending/);
+    await assert.rejects(submit([], oldToken), /No matching pending audit/);
+    await command.handler("audit", ctx);
+    await assert.rejects(submit([{ id: foreignAudit.id, action: "archive", reason: "Other project" }]), /not in this audit/);
+    await command.handler("audit --all-projects", ctx);
+    const currentArchive = observer.add(project, { text: "Audit archive.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    const globalRank = observer.add(GLOBAL_SCOPE, { text: "Audit ranking.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    await command.handler("audit --all-projects", ctx);
+    steps.push({ title: "Review memory audit", choice: "Apply all", match: /3 changes: 1 archives · 1 priority changes · 1 moves to global[\s\S]*cannot be restored[\s\S]*Priority 5 → 3/ });
+    const applied = await submit([{ id: currentArchive.id, action: "archive", reason: "Low value" },
+      { id: globalRank.id, action: "set_priority", priority: 3, reason: "Recurring failures" },
+      { id: foreignAudit.id, action: "move_global", reason: "Cross-project guidance" }]);
+    assert.equal(applied.details.status, "applied");
+    assert.equal(applied.details.count, 3);
+    assert.equal(observer.get(project, currentArchive.id).archived, true);
+    assert.equal(observer.get(GLOBAL_SCOPE, globalRank.id).priority, 3);
+    assert.equal(observer.get(GLOBAL_SCOPE, foreignAudit.id).scope, GLOBAL_SCOPE);
+    assert.equal(observer.history(GLOBAL_SCOPE, foreignAudit.id).events[0].actor, "user");
+    const untouched = observer.add(project, { text: "Keep unchanged.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
+    await command.handler("audit", ctx);
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { observer!.setPriority(project, untouched.id, 4, moveOrigin); } });
+    await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Stale" }]), /stale/i);
+    assert.equal(observer.get(project, untouched.id).archived, false);
+    await command.handler("audit", ctx);
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: async () => { await event("session_tree"); } });
+    await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Navigated" }]), /branch changed/);
+    assert.equal(observer.get(project, untouched.id).archived, false);
+    await command.handler("audit", ctx);
+    const abortProposal = new AbortController();
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { abortProposal.abort(new Error("proposal cancelled")); } });
+    await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Cancelled" }], proposalId(), abortProposal.signal), /proposal cancelled/);
+    await command.handler("audit", ctx);
+    ctx.hasUI = false;
+    await assert.rejects(submit([]), /requires interactive or RPC UI/);
+    ctx.hasUI = true;
+    assert.equal((await submit([])).details.status, "no changes");
+    await command.handler("audit", ctx);
+    const cancelledToken = proposalId();
+    await command.handler("audit cancel", ctx);
+    await assert.rejects(submit([], cancelledToken), /No matching pending audit/);
+    assert.equal(steps.length, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
     const total = observer.list(project).total;
