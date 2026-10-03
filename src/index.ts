@@ -15,7 +15,7 @@ import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operati
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
-import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
+import { GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string; audit?: boolean };
@@ -23,13 +23,12 @@ const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const BACKUP_TYPE = "pi-mem-backup-report";
 const LINEAGE_TYPE = "pi-mem-discovery-lineage";
-const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "evaluate", "audit", "reload", "help"];
+const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "move", "archive", "archived", "evaluate", "audit", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
   "/pi-mem global add|list|archived|search … — manage global lessons; ID commands resolve project or global lessons",
   "/pi-mem list [offset] | archived [offset] | search <text> | get <id>",
-  "/pi-mem add [--priority 0–10] <lesson> | supersede <id> [--priority 0–10] <lesson> | archive <id>",
-  "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
+  "/pi-mem add <lesson> | supersede <id> <lesson> | archive <id>",
   "/pi-mem history <id> [offset] — inspect retained activity and attribution",
   "/pi-mem move <id> <destination-path|--global|--project> — move lesson and linked history; --project means current project; preserve IDs",
   "/pi-mem audit [--all-projects] [--file <path>] — agent proposal with Apply all / Cancel; file export is recommendations only",
@@ -405,17 +404,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
       "supersede requires an active lesson id; it creates a replacement and archives the original atomically. archive requires id. " +
-      "add accepts no scope or priority; evaluation assigns both at promotion. " +
-      "set_priority requires priority, an integer from 1 (highest) to 10 (lowest). " +
-      "set_priority requires an active lesson id and changes only its priority; models cannot reprioritize priority 0. " +
+      "add accepts no scope; evaluation assigns scope at promotion. " +
       "reason optionally records why a change was made in the retained activity log. " +
-      "Score future usefulness by consequence of ignoring the lesson, likelihood of recurrence, and breadth of applicability. " +
-      "1–2: serious damage or corruption; 3–4: recurring failures or expensive debugging; " +
-      "5–6: useful recurring knowledge; 7–8: narrow quirks; 9–10: marginal future value. " +
-      "supersede inherits priority unless supplied; priority 0 is user-reserved and preserved when superseding. " +
       "Lesson content is retained: supersede rather than edit it; no restore or delete. Repeated candidate submissions do not add independent votes. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
-    promptSnippet: "Stage memory candidates, or supersede, archive, or reprioritize active lessons",
+    promptSnippet: "Stage memory candidates, or supersede or archive active lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
       id: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
@@ -424,15 +417,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       evidence: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_EVIDENCE })),
       reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600 })),
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
-      priority: Type.Optional(Type.Integer({ minimum: 1, maximum: 10,
-        description: "Required for set_priority; optional for supersede; forbidden for add. 1 = highest priority, 10 = lowest. Zero is user-only." })),
     }, { additionalProperties: false }),
     prepareArguments(args) {
       // Reject scope hints and coercible values before Pi schema validation.
       if (args && typeof args === "object") {
         if ("scope" in args) throw new Error("memory does not accept scope; evaluation decides promotion scope");
-        if ("action" in args && args.action === "add" && "priority" in args) throw new Error("add does not accept priority; evaluation assigns it at promotion");
-        if ("priority" in args) checkedPriority(args.priority, 1);
         if ("id" in args && args.id != null) return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
       }
       return args as MemoryRequest;
@@ -450,7 +439,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (params.basis !== "validated_learning" && params.basis !== "validated_fix" && params.basis !== "user_request") {
           throw new Error("add requires basis: validated_learning, validated_fix, or user_request");
         }
-        if ("priority" in params) throw new Error("add does not accept priority; evaluation assigns it at promotion");
         store.stageCandidate(scope, { text: params.text!, evidence: params.evidence!, basis: params.basis }, { ...origin(ctx, _id), reason: params.reason }, independenceKey(ctx));
         result = { status: "candidate staged", message: "Provisional for this session only; evaluate candidates and approve promotion to share it." };
       } else result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);
@@ -464,7 +452,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     name: "memory_audit",
     label: "Memory audit proposal",
     description: "Submit the complete structured proposal for a user-requested memory audit. Requires the auditId from the current audit export. " +
-      "Only audited active IDs are allowed; never target priority 0. Actions: archive, set_priority (priority 1–10), move_global. " +
+      "Only audited active IDs are allowed. Actions: archive, move_global. " +
       "One action per ID, with a short reason. Empty changes means no warranted changes. " +
       "Nothing changes without the user's Apply all choice in the extension UI; Cancel changes nothing. " +
       "Approval applies the whole batch atomically across audited scopes, rejecting stale lessons or duplicate destinations. " +
@@ -474,8 +462,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
       changes: Type.Array(Type.Union([
         Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("archive"),
           reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
-        Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("set_priority"),
-          priority: Type.Integer({ minimum: 1, maximum: 10 }), reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
         Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("move_global"),
           reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
       ]), { maxItems: 10000 }),
@@ -528,7 +514,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         }
         try { snapshot(ctx); } catch { /* Recall will refresh on the next request; never misreport a committed batch. */ }
         return result("applied", { count: applied.length, changes: applied.map((entry) => ({ id: entry.lesson.id,
-          action: entry.action, from: entry.from, scope: entry.lesson.scope, priority: entry.lesson.priority,
+          action: entry.action, from: entry.from, scope: entry.lesson.scope,
           ...(entry.moved === undefined ? {} : { records: entry.moved }) })) });
       } finally {
         signal?.removeEventListener("abort", abort);
@@ -553,7 +539,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
         candidateIds: Type.Array(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), { minItems: 1, maxItems: 10000 }),
         text: Type.String({ minLength: 1, maxLength: MAX_TEXT }),
         evidence: Type.String({ minLength: 1, maxLength: MAX_EVIDENCE }),
-        priority: Type.Integer({ minimum: 1, maximum: 10 }),
         scope: StringEnum(["project", "global"] as const),
         reason: Type.String({ minLength: 1, maxLength: 600 }), recommend: Type.Boolean(),
       }, { additionalProperties: false }), { maxItems: 10000 }),
@@ -636,7 +621,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (command === "reload") reset();
         const { store, path, scope: project } = current(ctx);
         let scope = globalCommand ? GLOBAL_SCOPE : project;
-        if (["get", "history", "move", "priority", "supersede", "archive"].includes(command)) {
+        if (["get", "history", "move", "supersede", "archive"].includes(command)) {
           scope = store.scopeForId(project, parseLessonId(firstWord(rest)[0]));
         }
         const source = origin(ctx);
@@ -696,23 +681,18 @@ export default function memoryExtension(pi: ExtensionAPI) {
             : destination === "--project" ? project : moveDestination(ctx.cwd, destination).scope;
           const moved = store.moveLesson(scope, id, to, source);
           show({ id, status: "moved", records: moved, from: scope, to }, ctx);
-        } else if (command === "priority") {
-          const [id, value] = firstWord(rest);
-          if (!/^(?:[0-9]|10)$/.test(value)) throw new Error("Usage: /pi-mem priority <id> <0–10>");
-          const lesson = store.setPriority(scope, parseLessonId(id), Number(value), source);
-          show({ id: lesson.id, priority: lesson.priority, status: "priority updated", scope }, ctx);
         } else if (command === "add" || command === "supersede") {
           const [id, body] = command === "supersede" ? firstWord(rest) : ["", rest];
-          const { text, priority } = commandLesson(body);
-          const input = { text, priority: command === "add" ? priority ?? DEFAULT_PRIORITY : priority,
+          if (body.trimStart().startsWith("--")) throw new Error("Lesson flags are not supported; supply lesson text");
+          const input = { text: body,
             basis: "user_request" as const, evidence: "User-requested." };
           if (command === "add") {
             const result = store.add(scope, input, source);
-            show(recordWrite({ id: result.lesson.id, priority: result.lesson.priority,
+            show(recordWrite({ id: result.lesson.id,
               status: result.created ? "saved" : "already exists", scope }, ctx), ctx);
           } else {
             const result = store.supersede(scope, parseLessonId(id), input, source);
-            show(recordWrite({ id: result.id, priority: result.priority, supersedes_id: result.supersedes_id,
+            show(recordWrite({ id: result.id, supersedes_id: result.supersedes_id,
               status: "superseded", scope }, ctx), ctx);
           }
         } else if (command === "archive") {
@@ -728,14 +708,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
     },
   });
-}
-
-function commandLesson(value: string): { text: string; priority?: number } {
-  const [flag, rest] = firstWord(value);
-  if (flag !== "--priority") return { text: value };
-  const [score, text] = firstWord(rest);
-  if (!/^(?:[0-9]|10)$/.test(score)) throw new Error("--priority requires an integer from 0 to 10");
-  return { text, priority: checkedPriority(Number(score)) };
 }
 
 function firstWord(value: string): [string, string] {

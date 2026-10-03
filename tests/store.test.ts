@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { promisify } from "node:util";
+import { DEFAULT_LIMITS } from "../src/limits.ts";
 import { MemoryStore } from "../src/store.ts";
 
 const source = { harness: "test", session: "session-one" };
@@ -24,7 +24,6 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   const saved = db.add("/projects/a", input, source);
   assert.equal(saved.created, true);
   assert.equal(saved.lesson.id, 1);
-  assert.equal("legacy_id" in saved.lesson, false);
   assert.deepEqual(db.add("/projects/a", { ...input, text: "Use  the project-local\nenvironment." }, source),
     { ...saved, created: false });
   assert.equal(db.list("/projects/ab").total, 0);
@@ -65,123 +64,25 @@ test("lessons persist, deduplicate active text, retain predecessors and stay pro
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-for (const version of [1, 2, 3, 4, 5]) test(`schema ${version} upgrades discard UUIDs while retaining lessons, integer history and recall order`, (t) => {
+test("fresh schema has no priority and rejects previous versions without writes", (t) => {
   const path = temporary(t);
-  const legacy = new DatabaseSync(path);
-  t.after(() => legacy.close());
-  legacy.exec(`
-    PRAGMA foreign_keys = ON;
-    CREATE TABLE lessons (
-      id ${version >= 4 ? "INTEGER" : "TEXT"} PRIMARY KEY ${version === 5 ? "CHECK(typeof(id) = 'integer' AND id > 0)" : ""},
-      ${version === 4 ? "legacy_id TEXT UNIQUE," : ""}
-      scope TEXT NOT NULL,
-      text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1200),
-      text_key TEXT NOT NULL,
-      evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND 600),
-      basis TEXT NOT NULL CHECK(basis IN ('validated_fix', 'user_request', 'import'${version >= 2 ? ", 'validated_learning'" : ""})),
-      source_harness TEXT NOT NULL,
-      source_session TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      revision INTEGER NOT NULL DEFAULT 1,
-      archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
-      ${version >= 3 ? `archived_at INTEGER, supersedes_id ${version >= 4 ? "INTEGER" : "TEXT"} UNIQUE REFERENCES lessons(id)` : "UNIQUE(scope, text_key)"}
-    ) ${version >= 3 ? "WITHOUT ROWID" : ""};
-    CREATE INDEX lessons_recall ON lessons(scope, archived, updated_at DESC, id);
-    PRAGMA application_id = ${0x504d454d};
-    PRAGMA user_version = ${version};
-  `);
-  const bases = ["validated_fix", "user_request", "import", ...(version >= 2 ? ["validated_learning"] : [])];
-  const uuids = bases.map((_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`);
-  const ids = version >= 4 ? [41, 7, 99, 3] : uuids;
-  for (const [i, basis] of bases.entries()) {
-    const text = `Legacy ${basis} lesson.`;
-    legacy.prepare(`INSERT INTO lessons
-      (id, scope, text, text_key, evidence, basis, source_harness, source_session, created_at, updated_at, revision, archived)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      ids[i], version >= 3 && i === 3 ? "/other" : "/project", text,
-      createHash("sha256").update(text).digest("hex"), "Previously verified.",
-      basis, "legacy", i === 0 ? null : "old-session", 100 + i, 300 - i, 3 + i,
-      i === 0 || (version >= 3 && i === 1) ? 1 : 0,
-    );
-    if (version >= 3) legacy.prepare("UPDATE lessons SET archived_at = ?, supersedes_id = ? WHERE id = ?")
-      .run(i < 2 ? 150 + i : null, i === 1 || i === 2 ? ids[i - 1] : null, ids[i]);
-    if (version === 4) legacy.prepare("UPDATE lessons SET legacy_id = ? WHERE id = ?").run(uuids[i], ids[i]);
-  }
-  if (version >= 3) legacy.exec(`
-    CREATE UNIQUE INDEX lessons_active_text ON lessons(scope, text_key) WHERE archived = 0;
-    CREATE TRIGGER lessons_immutable BEFORE UPDATE OF text ON lessons
-      BEGIN SELECT RAISE(ABORT, 'immutable'); END;
-    CREATE TRIGGER lessons_no_delete BEFORE DELETE ON lessons
-      BEGIN SELECT RAISE(ABORT, 'cannot be deleted'); END;
-    CREATE TRIGGER lessons_archive_only BEFORE UPDATE OF archived, archived_at ON lessons
-      WHEN OLD.archived != 0 OR NEW.archived != 1 OR NEW.archived_at IS NULL
-      BEGIN SELECT RAISE(ABORT, 'Only active-to-archived transitions are allowed'); END;
-  `);
-  const original = legacy.prepare("SELECT * FROM lessons ORDER BY created_at, id").all();
-  const mapping = new Map(original.map((row, i) => [row.id, version >= 4 ? Number(row.id) : i + 1]));
-  const expected = original.map(({ legacy_id: _discarded, ...row }) => ({ ...row, priority: 5, id: mapping.get(row.id)!,
-    archived_at: row.archived_at ?? null, supersedes_id: row.supersedes_id ? mapping.get(row.supersedes_id) : null }))
-    .sort((a, b) => a.id - b.id);
-  const firstId = mapping.get(ids[0])!;
-  const secondId = mapping.get(ids[1])!;
-
-  let db = new MemoryStore(path);
+  const db = new MemoryStore(path, { ...DEFAULT_LIMITS, maxRecallLessons: 1 });
   t.after(() => db.close());
-  const migrated = new DatabaseSync(path);
+  const raw = new DatabaseSync(path);
   try {
-    assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all().map((row) => ({ ...row })), expected);
-    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 8);
-    if (version <= 2) {
-      const history = db.history("/project", firstId).events;
-      assert.deepEqual(history.map((event) => event.action), ["archive", "create"]);
-      assert.equal(history[0].at, null, "unknown archive dates stay unknown despite causal ordering");
-    }
-    assert.equal(migrated.prepare("PRAGMA table_info(lessons)").all().some((column) => column.name === "legacy_id"), false);
-    for (const uuid of uuids) assert.equal(JSON.stringify(expected).includes(uuid), false);
-    assert.equal(migrated.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
-    assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_recall'").get());
-    assert.equal(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'lessons_previous'").get(), undefined);
-    assert.throws(() => legacy.prepare("UPDATE lessons SET text = 'Old client overwrite' WHERE id = ?").run(secondId), /immutable/);
-    assert.throws(() => legacy.prepare("UPDATE lessons SET archived = 0 WHERE id = ?").run(firstId), /active-to-archived/);
-    assert.throws(() => legacy.exec(`INSERT INTO lessons
-      (id, scope, text, text_key, evidence, basis, source_harness, created_at, updated_at)
-      VALUES ('old-client-uuid', '/project', 'Old client.', 'new-key', 'Verified.', 'user_request', 'test', 1, 1)`),
-      /CHECK constraint/, "an already-open old client cannot insert UUIDs after migration");
-  } finally {
-    migrated.close();
-  }
-  for (const row of original) {
-    const id = mapping.get(row.id)!;
-    assert.equal(db.get(String(row.scope), id).text, row.text);
-    // Exercise stale untyped callers: neither old UUID primary keys nor v4 aliases may resolve.
-    const uuid = (version >= 4 ? uuids[0] : row.id) as unknown as number;
-    assert.throws(() => db.get(String(row.scope), uuid), /positive safe integer/);
-    assert.throws(() => db.archive(String(row.scope), uuid), /positive safe integer/);
-    assert.throws(() => db.supersede(String(row.scope), uuid, input, source), /positive safe integer/);
-    assert.throws(() => db.get("/missing", id), /not found in this project/);
-  }
-  assert.deepEqual([...db.recall("/project").lessons].map((row) => row.id),
-    original.filter((row) => row.scope === "/project" && row.archived === 0).reverse().map((row) => mapping.get(row.id)),
-    "creation time, not legacy updated time, determines recall");
-  const archived = db.get("/project", firstId);
-  assert.equal(archived.archived_at, version >= 3 ? 150 : null, "migration must preserve known/unknown archive dates");
-  const fresh = db.add("/project", archived, source);
-  assert.equal(fresh.created, true);
-  assert.equal(fresh.lesson.id, Math.max(...mapping.values()) + 1);
-  assert.deepEqual(db.get("/project", archived.id), archived);
-  const predecessor = db.get("/project", mapping.get(ids[2])!);
-  const successor = db.supersede("/project", predecessor.id,
-    { ...input, text: "Build assets before packaging.", basis: "validated_learning" }, source);
-  assert.equal(successor.supersedes_id, predecessor.id);
-  assert.equal(db.archive("/project", predecessor.id).lesson.id, predecessor.id);
-  db.close();
-  db = new MemoryStore(path);
-  assert.deepEqual(db.get("/project", successor.id), successor);
-  assert.equal(successor.basis, "validated_learning");
-  assert.equal(db.get("/project", predecessor.id).text, predecessor.text);
-  assert.deepEqual(db.get("/project", firstId), archived, "reopening must not renumber records");
+    assert.equal(Number(raw.prepare("PRAGMA user_version").get()!.user_version), 9);
+    assert.equal(raw.prepare("PRAGMA table_info(lessons)").all().some((column) => column.name === "priority"), false);
+    assert.equal(raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='priority_changes'").get(), undefined);
+    db.add("/project", input, source);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    const newest = db.add("/project", { ...input, text: "Newest lesson." }, source).lesson;
+    assert.deepEqual([...db.recall("/project").lessons].map((lesson) => lesson.id), [newest.id]);
+    const before = raw.prepare("SELECT * FROM lessons ORDER BY id").all();
+    raw.exec("PRAGMA user_version = 8");
+    assert.throws(() => new MemoryStore(path), /schema|version/i);
+    assert.deepEqual(raw.prepare("SELECT * FROM lessons ORDER BY id").all(), before);
+    assert.equal(Number(raw.prepare("PRAGMA user_version").get()!.user_version), 8);
+  } finally { raw.close(); }
 });
 
 test("scope listing and moves include archived lessons and preserve records atomically", (t) => {
@@ -215,11 +116,9 @@ test("moveLesson moves an archived lesson's full chain and rolls back destinatio
   const first = db.add("/from", input, source).lesson;
   const middle = db.supersede("/from", first.id, { ...input, text: "Middle linked lesson." }, source);
   const last = db.supersede("/from", middle.id, { ...input, text: "Last linked lesson." }, source);
-  db.setPriority("/from", last.id, 2, source);
   const unrelated = db.add("/from", { ...input, text: "Unrelated lesson." }, source).lesson;
   const selected = db.get("/from", middle.id);
   assert.equal(selected.archived, true);
-  const changes = raw.prepare("SELECT * FROM priority_changes WHERE lesson_id = ?").all(last.id);
   const chain = [first, middle, last].map((row) => db.get("/from", row.id));
   for (const badId of [0, true, "1", 1.5]) {
     assert.throws(() => db.moveLesson("/from", badId as number, "/to"), /positive safe integer/);
@@ -233,7 +132,6 @@ test("moveLesson moves an archived lesson's full chain and rolls back destinatio
     assert.throws(() => db.get("/from", row.id), /not found/);
   }
   assert.deepEqual(db.get("/from", unrelated.id), unrelated);
-  assert.deepEqual(raw.prepare("SELECT * FROM priority_changes WHERE lesson_id = ?").all(last.id), changes);
   const duplicate = db.add("/to", { ...input, text: "Collision text." }, source).lesson;
   const active = db.add("/from", { ...input, text: "Collision   text." }, source).lesson;
   assert.throws(() => db.moveLesson("/from", active.id, "/to"), /Duplicate active text/);
@@ -246,7 +144,6 @@ test("moveLesson moves an archived lesson's full chain and rolls back destinatio
   assert.throws(() => raw.exec("UPDATE lessons SET scope = '/tampered' WHERE id = 1"), /immutable/);
   const reopened = new MemoryStore(path);
   try {
-    assert.equal(reopened.get("/to", last.id).priority, 2);
     assert.equal(reopened.get("/to", last.id).supersedes_id, middle.id);
   } finally { reopened.close(); }
 });

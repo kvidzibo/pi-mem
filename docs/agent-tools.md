@@ -26,8 +26,6 @@ human additions still create active lessons immediately.
   at most **600 characters**. Both also obey configured word limits (default
   **20 words each**). A supplied `reason` is nonblank, at most **600 characters**.
   Forbidden control characters are rejected.
-- Priorities on active lessons are integers **1–10**: 1 highest, 10 lowest.
-  Priority guides attention, not instruction authority; **0** is reserved for humans.
 - No secrets or raw transcripts. Origins, timestamps, project roots, and
   discovery-lineage metadata are captured by the extension, not supplied by the
   submitting agent.
@@ -42,37 +40,27 @@ publish it locally or globally. Evaluation decides the proposed promotion scope.
 type Basis = "validated_learning" | "validated_fix" | "user_request";
 
 interface MemoryRequest {
-  action: "add" | "supersede" | "archive" | "set_priority";
+  action: "add" | "supersede" | "archive";
   id?: number;
   text?: string;
   evidence?: string;
   basis?: Basis;
-  priority?: number;
   reason?: string;
 }
 ```
 
-The runtime uses a flat root object with a common optional `priority` for
-`supersede` and `set_priority`. `add` must omit it: both preparation and execution
-reject supplied priority, even explicit `undefined`. The handler enforces these
-conditional requirements:
+The handler enforces these conditional requirements:
 
 | Action | Required fields beyond `action` | Effect |
 |---|---|---|
-| `add` | `text`, `evidence`, `basis` | Stage a private candidate; no shared lesson or priority score is created |
+| `add` | `text`, `evidence`, `basis` | Stage a private candidate; no shared lesson is created |
 | `supersede` | `id`, `text`, `evidence`, `basis` | Atomically create a linked replacement and archive the predecessor |
 | `archive` | `id` | Exclude a retained lesson from recall; repeating an archive is a no-op |
-| `set_priority` | `id`, `priority` | Change an active lesson's priority without replacing its content |
 
-`priority` is optional for `supersede` (otherwise inherited) and required for
-`set_priority`; where valid it must be an integer **1–10**. `reason` is optional
-for every action. `add` accepts neither `scope` nor `priority`; there is no default
-or stored candidate priority. Project and session context are captured automatically. New-lesson priority is
-proposed during evaluation, not submission; promotion still requires user
-approval. `supersede` inherits priority unless supplied, and always preserves a
-predecessor's priority 0. Models cannot reprioritize priority-0 lessons. ID-based
-actions resolve and retain the existing current-project or global scope;
-other-project IDs are inaccessible.
+`reason` is optional for every action. Project and session context are captured
+automatically. Promotion still requires user approval. ID-based actions resolve
+and retain the existing current-project or global scope; other-project IDs are
+inaccessible.
 
 A candidate is recalled only in its originating session/project. Pending
 identity is originating project + normalized wording; retries from one session
@@ -81,28 +69,26 @@ prior matches, or pool/occurrence counts.
 
 Ordinary writes are blocked during staged audits/evaluations and memory reviews,
 and through the remainder of their agent run until a fresh prompt. Ephemeral
-sessions require `basis: "user_request"` for **every** ordinary write, including
-archive and priority changes.
+sessions require `basis: "user_request"` for every ordinary write, including
+archive.
 
 ### Results
 
 ```ts
 type MemoryResult =
   | { status: "candidate staged"; message: string }
-  | { status: "superseded"; id: number; priority: number;
-      supersedes_id: number | null; scope: string }
-  | { status: "priority updated"; id: number; priority: number; scope: string }
+  | { status: "superseded"; id: number; supersedes_id: number | null; scope: string }
   | { id: number; archived: boolean; changed: boolean; scope: string };
 ```
 
 Output `scope` identifies an already-active lesson's stored scope: its absolute
 project-root path or `"global"`. It is not a submission preference. The archive
-result has no `status` field. An inherited priority can be 0.
+result has no `status` field.
 
 ```json
 {
   "action": "add",
-  "text": "Back up SQLite before applying schema migrations.",
+  "text": "Back up SQLite before applying schema changes.",
   "evidence": "Verified recovery from a database snapshot.",
   "basis": "validated_fix"
 }
@@ -117,7 +103,6 @@ start an audit or request arbitrary lessons/scopes.
 ```ts
 type AuditChange =
   | { id: number; action: "archive"; reason: string }
-  | { id: number; action: "set_priority"; priority: number; reason: string }
   | { id: number; action: "move_global"; reason: string };
 
 interface MemoryAuditRequest {
@@ -126,8 +111,7 @@ interface MemoryAuditRequest {
 }
 ```
 
-- One action per audited active ID. Priority-0 IDs are forbidden.
-- Priorities must be 1–10; unchanged priority and already-global moves are rejected.
+- One action per audited active ID.
 - TUI or RPC UI is required. **Apply all** commits the entire batch atomically;
   **Cancel** changes nothing. Moves include linked replacement history.
 - A stale snapshot or duplicate destination rejects the batch. Session, branch,
@@ -142,8 +126,8 @@ type MemoryAuditResult =
   | { status: "cancelled"; message: string }
   | { status: "applied"; count: number; changes: Array<{
       id: number;
-      action: "archive" | "set_priority" | "move_global";
-      from: string; scope: string; priority: number;
+      action: "archive" | "move_global";
+      from: string; scope: string;
       records?: number; // linked records moved, for move_global
     }> };
 ```
@@ -160,8 +144,7 @@ interface CandidateGroup {
   candidateIds: number[]; // 1–10,000 exported IDs, unique across all groups
   text: string;
   evidence: string;
-  priority: number; // integer 1–10
-  scope: "project" | "global"; // proposed HERE, not during lesson submission
+  scope: "project" | "global";
   reason: string;
   recommend: boolean;
 }
@@ -204,9 +187,5 @@ type MemoryEvaluateResult =
       candidates: { pending: number; sinceEvaluation: number } };
 ```
 
-`groupIndex` is zero-based. Each evaluated group proposes its priority (integer
-1–10) and promotion scope; an approved promotion creates or reuses an active
-lesson. Existing active duplicates retain their priority, including inherited
-priority 0. `created: false` means an exact active duplicate was reused without
-changing its priority. Evaluation results may contain pool counts;
-ordinary submitting agents never receive them in submission acknowledgements.
+`groupIndex` is zero-based. An approved promotion creates or reuses an active
+lesson. `created: false` means an exact active duplicate was reused.

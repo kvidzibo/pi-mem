@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { MemoryStore } from "../src/store.ts";
 import { reviewEvaluation } from "../src/evaluation.ts";
 import { DEFAULT_LIMITS } from "../src/limits.ts";
@@ -12,7 +12,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 const dir=()=>mkdtempSync(join(tmpdir(),"pi-candidates-"));
 const lesson={text:"Keep the verified project configuration.",evidence:"A repeated clean run confirmed the configuration.",basis:"validated_learning" as const};
 const origin=(session:string)=>({harness:"test",session,actor:"user" as const});
-const group={candidateIds:[] as number[],text:lesson.text,evidence:lesson.evidence,priority:5,scope:"project" as const,reason:"Confirmed independently",recommend:true};
+const group={candidateIds:[] as number[],text:lesson.text,evidence:lesson.evidence,scope:"project" as const,reason:"Confirmed independently",recommend:true};
 
 test("candidate isolation, lineage dedupe, qualification, retained decline and evaluation highwater",t=>{
  const root=dir();t.after(()=>rmSync(root,{recursive:true,force:true}));const store=new MemoryStore(join(root,"db"));t.after(()=>store.close());
@@ -23,7 +23,6 @@ test("candidate isolation, lineage dedupe, qualification, retained decline and e
  assert.equal(store.ownCandidates("/p/a","owner-a")[0].observations.length,1);
  assert.equal(store.ownCandidates("/p/a","owner-b")[0].observations[0].wording,lesson.text);
  assert.equal(store.ownCandidates("/p/a","owner-b")[0].evidence,"Owner B verified a separate clean run.");
- assert.equal("priority" in store.ownCandidates("/p/a","owner-b")[0],false);
  assert.equal(store.ownCandidates("/p/a","fork-a")[0].evidence,"Fork repeated the same discovery.");
  assert.deepEqual(store.ownCandidates("/p/a","unrelated"),[]);
  assert.equal(store.candidateCounts().pending,1);
@@ -102,9 +101,8 @@ test("exposure survives promotion and recreated exact identities without changin
     "the promoted original's disclosure still excludes the evaluator's later repetition");
   store.stageCandidate("/p/a", lesson, origin("second-peer"), "second-peer");
   const fresh = store.candidateSnapshot();
-  const repeated = store.completeCandidateEvaluation(fresh, origin("approver"), [{ ...group, priority: 8, candidateIds: fresh.candidates.map(c => c.id) }], [0]);
+  const repeated = store.completeCandidateEvaluation(fresh, origin("approver"), [{ ...group, candidateIds: fresh.candidates.map(c => c.id) }], [0]);
   assert.deepEqual(repeated, [{ groupIndex: 0, lessonId, created: false }]);
-  assert.equal(store.get("/p/a", lessonId).priority, 5, "duplicate promotion cannot rerank an existing lesson");
   assert.equal(store.history("/p/a", lessonId).events.length, 1);
 });
 
@@ -136,14 +134,4 @@ test("RPC review uniquely selects and revises identical project suggestions afte
   assert.deepEqual(approved, [0], "No on the reopened second group removes only its own approval");
   assert.equal(rootSelections.length, 0); assert.equal(decisions.length, 0);
   assert.equal(store.list("/p/a").total, 0); assert.equal(store.list("/p/b").total, 0, "review selections alone do not write lessons");
-});
-
-test("schema 7 upgrades atomically to candidate schema 8",t=>{
- const root=dir();t.after(()=>rmSync(root,{recursive:true,force:true}));const path=join(root,"db");
- const first=new MemoryStore(path);first.add("/p/a",lesson,origin("x"));first.close();
- const legacy=new DatabaseSync(path);
- legacy.exec("PRAGMA foreign_keys=OFF; DROP TABLE candidate_group_members; DROP TABLE candidate_evaluation_groups; DROP TABLE candidate_evaluations; DROP TABLE candidate_exposures; DROP TABLE candidate_observations; DROP TABLE candidates; DROP TABLE candidate_state; PRAGMA user_version=7");
- legacy.close();
- const upgraded=new MemoryStore(path);t.after(()=>upgraded.close());
- const check=new DatabaseSync(path);try{assert.equal(Number(check.prepare("PRAGMA user_version").get()!.user_version),8);assert.equal(check.prepare("SELECT count(*) n FROM lessons").get()!.n,1);assert.equal(check.prepare("SELECT count(*) n FROM candidates").get()!.n,0);assert.equal(check.prepare("PRAGMA table_info(candidates)").all().some(column=>column.name==="requested_scope"||column.name==="priority"),false);assert.equal(check.prepare("PRAGMA table_info(candidate_observations)").all().some(column=>column.name==="priority"),false);}finally{check.close();}
 });
