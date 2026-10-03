@@ -418,6 +418,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const messages: Array<{ content: string; customType?: string }> = [];
   const dispatchOptions: unknown[] = [];
   const widgets: Array<string[] | undefined> = [];
+  const statuses: Array<string | undefined> = [];
   type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; absent?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
@@ -433,7 +434,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       getBranch: () => extension.sessionLog.getBranch(), getLeafId: () => extension.sessionLog.getLeafId() },
     modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
     ui: {
-      notify: (text: string) => notices.push(text), setStatus() {},
+      notify: (text: string) => notices.push(text), setStatus: (_key: string, text?: string) => statuses.push(text),
       setWidget: (_key: string, lines?: string[]) => widgets.push(lines),
       input: async () => { assert.ok(inputs.length, "unexpected input"); return inputs.shift(); },
       custom: async (factory: any) => {
@@ -864,12 +865,28 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     const globalRank = observer.add(GLOBAL_SCOPE, { text: "Audit ranking.", evidence: "Verified.", basis: "user_request" }, moveOrigin).lesson;
     await command.handler("audit --all-projects", ctx);
     steps.push({ title: "Review memory audit", choice: "Apply all", match: /3 changes: 1 archives · 1 priority changes · 1 moves to global[\s\S]*cannot be restored[\s\S]*Priority 5 → 3/ });
+    const archivesBeforeAudit = Number(/-(\d+)/.exec(statuses.at(-1) ?? "")?.[1] ?? 0);
     const applied = await submit([{ id: currentArchive.id, action: "archive", reason: "Low value" },
       { id: globalRank.id, action: "set_priority", priority: 3, reason: "Recurring failures" },
       { id: foreignAudit.id, action: "move_global", reason: "Cross-project guidance" }]);
     assert.equal(applied.details.status, "applied");
     assert.equal(applied.details.count, 3);
     assert.equal(observer.get(project, currentArchive.id).archived, true);
+    assert.equal(observer.history(project, currentArchive.id).events[0].action, "archive");
+    const auditEntry = extension.sessionLog.getEntries().find((entry: SessionEntry): entry is CustomEntry =>
+      entry.type === "custom" && entry.customType === "pi-mem-archived" && (entry.data as { id?: number } | undefined)?.id === currentArchive.id);
+    assert.ok(auditEntry, "audit archives retain a durable footer marker");
+    assert.equal(auditEntry.data.audit, true);
+    const archiveRenderer = extension.entryRenderers.get("pi-mem-archived")!;
+    const theme = { fg: (_color: string, text: string) => text } as any;
+    for (const expanded of [false, true]) assert.equal(archiveRenderer(auditEntry, { expanded }, theme), undefined);
+    const archiveCount = new RegExp(`-${archivesBeforeAudit + 1}\\)`);
+    assert.match(statuses.at(-1)!, archiveCount);
+    await command.handler("reload", ctx);
+    assert.match(statuses.at(-1)!, archiveCount);
+    await event("session_start");
+    assert.match(statuses.at(-1)!, archiveCount);
+    assert.equal(archiveRenderer(auditEntry, { expanded: false }, theme), undefined);
     assert.equal(observer.get(GLOBAL_SCOPE, globalRank.id).priority, 3);
     assert.equal(observer.get(GLOBAL_SCOPE, foreignAudit.id).scope, GLOBAL_SCOPE);
     assert.equal(observer.history(GLOBAL_SCOPE, foreignAudit.id).events[0].actor, "user");

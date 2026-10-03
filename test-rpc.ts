@@ -318,6 +318,11 @@ export default function(pi) {
     assert.ok(review.title.includes(other));
     assert.match(review.title, /Cross-project guidance/);
     assert.equal(store.get(project, archived.id).archived, true);
+    const archiveEntries = approved.filter((event) => event.type === "entry_appended" && event.entry?.customType === "pi-mem-archived");
+    assert.equal(archiveEntries.length, 1);
+    assert.equal(archiveEntries[0].entry.data.audit, true, "audit archive markers are hidden by the TUI renderer");
+    assert.ok(approved.some((event) => event.method === "setStatus" && /\(-1\)/.test(event.statusText)));
+    assert.equal(store.history(project, archived.id).events[0].action, "archive");
     assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
     assert.equal(store.get(GLOBAL_SCOPE, moved.id).scope, GLOBAL_SCOPE);
     const history = store.history(GLOBAL_SCOPE, moved.id).events[0];

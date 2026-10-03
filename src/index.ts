@@ -16,7 +16,7 @@ import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
 import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
-type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
+type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string; audit?: boolean };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const BACKUP_TYPE = "pi-mem-backup-report";
@@ -173,13 +173,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   }
 
-  function recordArchived(id: number, ctx: ExtensionContext) {
+  function recordArchived(id: number, ctx: ExtensionContext, audit = false) {
     try {
       const { store, path, scope: project } = current(ctx);
       const scope = store.scopeForId(project, id);
       const { text } = store.get(scope, id);
-      // Keep a chat card and session footer counter in addition to the database activity log.
-      pi.appendEntry<ArchivedLesson>(ARCHIVED_TYPE, { id, text, scope, database: path, session: ctx.sessionManager.getSessionId() });
+      // Audit entries remain durable for footer counts but do not render chat cards.
+      pi.appendEntry<ArchivedLesson>(ARCHIVED_TYPE, { id, text, scope, database: path, session: ctx.sessionManager.getSessionId(),
+        ...(audit ? { audit: true } : {}) });
     } catch (error) {
       if (ctx.hasUI) ctx.ui.notify(`Memory archived, but chat entry failed: ${clipped(String(error), 700)}`, "warning");
     }
@@ -201,6 +202,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   pi.registerEntryRenderer<ArchivedLesson>(ARCHIVED_TYPE, (entry, _options, theme) => {
     const lesson = entry.data;
+    if (lesson?.audit) return undefined;
     return new Text(lesson ? `${theme.fg("warning", "Memory archived (-1)")}\n#${lesson.id}: ${visible(lesson.text)}` : "", 0, 0);
   });
 
@@ -451,7 +453,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         const applied = audit.state.store.applyAudit(audit.snapshot, changes, { ...origin(ctx, _id), actor: "user" });
         for (const entry of applied) {
           if (entry.action === "archive" && (entry.from === audit.snapshot.project || entry.from === GLOBAL_SCOPE)) {
-            try { recordArchived(entry.lesson.id, ctx); } catch { /* Committed writes remain successful if UI reporting fails. */ }
+            try { recordArchived(entry.lesson.id, ctx, true); } catch { /* Committed writes remain successful if UI reporting fails. */ }
           }
         }
         try { snapshot(ctx); } catch { /* Recall will refresh on the next request; never misreport a committed batch. */ }
