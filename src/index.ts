@@ -46,7 +46,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function reset() {
     generation++;
     pendingAudit = undefined;
-    auditTurnBlocked = false;
     menu?.abort(new Error("Session or memory configuration changed; menu closed"));
     state?.store.close();
     state = undefined;
@@ -261,6 +260,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    // Only a fresh prompt releases the run-level barrier. Reload, navigation, compaction and automatic retries do not.
+    if (!pendingAudit && !auditController && !menu) auditTurnBlocked = false;
     try {
       const { limits } = current(ctx);
       return { systemPrompt: event.systemPrompt + "\n\nFor memory add/supersede: save one actionable point, preferably one sentence. " +
@@ -275,13 +276,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   const invalidateAudit = () => {
     pendingAudit = undefined;
-    auditTurnBlocked = false;
     menu?.abort(new Error("Session branch changed; memory review cancelled"));
     recallContext.reset();
   };
   pi.on("session_compact", invalidateAudit);
   pi.on("session_tree", invalidateAudit);
-  pi.on("agent_end", () => { if (!pendingAudit && !auditController) auditTurnBlocked = false; });
 
   pi.on("context", (event, ctx) => {
     let recalled: RecallSnapshot;
@@ -456,7 +455,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (command === "audit") {
           if (rest.trim() === "cancel") {
             pendingAudit = undefined;
-            auditTurnBlocked = ctx.isIdle?.() === false;
             auditController?.abort(new Error("Audit cancelled; no memories changed"));
             show("Audit cancelled; no memories changed.", ctx);
             return;

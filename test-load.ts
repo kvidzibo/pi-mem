@@ -837,6 +837,18 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     steps.push({ title: "Review memory audit", choice: "Apply all", before: async () => { await event("session_tree"); } });
     await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Navigated" }]), /branch changed/);
     assert.equal(observer.get(project, untouched.id).archived, false);
+    const blockedWrite = () => ordinaryTool.execute("call", { action: "archive", id: globalAudit.id }, undefined, undefined, ctx);
+    await assert.rejects(blockedWrite(), /review pending/);
+    await command.handler("audit", ctx);
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: async () => { await command.handler("reload", ctx); } });
+    await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Reloaded" }]), /Session or memory configuration changed/);
+    await assert.rejects(blockedWrite(), /review pending/);
+    await command.handler("audit", ctx);
+    steps.push({ title: "Review memory audit", choice: "Apply all", before: async () => { await event("session_compact"); } });
+    await assert.rejects(submit([{ id: untouched.id, action: "archive", reason: "Compacted" }]), /branch changed/);
+    await assert.rejects(blockedWrite(), /review pending/);
+    assert.equal(observer.get(project, untouched.id).archived, false);
+    assert.equal(observer.get(GLOBAL_SCOPE, globalAudit.id).archived, false);
     await command.handler("audit", ctx);
     const abortProposal = new AbortController();
     steps.push({ title: "Review memory audit", choice: "Apply all", before: () => { abortProposal.abort(new Error("proposal cancelled")); } });
@@ -850,6 +862,10 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     const cancelledToken = proposalId();
     await command.handler("audit cancel", ctx);
     await assert.rejects(submit([], cancelledToken), /No matching pending audit/);
+    await assert.rejects(blockedWrite(), /review pending/);
+    await event("before_agent_start"); // A fresh user prompt, not an automatic continuation, releases the barrier.
+    assert.equal(JSON.parse((await ordinaryTool.execute("call", { action: "set_priority", id: globalRank.id, priority: 3,
+      basis: "user_request" }, undefined, undefined, ctx)).content[0].text).status, "priority updated");
     assert.equal(steps.length, 0);
 
     // Reconnect invalidates a pending confirmation, even if it eventually returns approval.
