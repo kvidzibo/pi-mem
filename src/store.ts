@@ -379,7 +379,9 @@ export class MemoryStore {
   ownCandidates(project: string, session: string): Candidate[] { return this.candidatesStore.own(project, session); }
   candidateCounts(): { pending: number; sinceEvaluation: number } { return this.candidatesStore.counts(); }
   candidateSnapshot(): CandidateSnapshot { return this.candidatesStore.snapshot(); }
-  markCandidateExposure(snapshot: CandidateSnapshot, independenceKey: string): CandidateSnapshot { return this.candidatesStore.expose(snapshot, independenceKey); }
+  markCandidateExposure(snapshot: CandidateSnapshot, independenceKey: string, beforeDisclosure?: (snapshot: CandidateSnapshot) => void): CandidateSnapshot {
+    return this.candidatesStore.expose(snapshot, independenceKey, beforeDisclosure);
+  }
   qualifyCandidateGroup(snapshot: CandidateSnapshot, candidateIds: number[], scope: "project" | "global") {
     return this.candidatesStore.qualify(snapshot, candidateIds, scope);
   }

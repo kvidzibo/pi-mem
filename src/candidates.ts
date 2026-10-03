@@ -16,7 +16,7 @@ export interface CandidateGroup {
   candidateIds: number[]; text: string; evidence: string; priority: number;
   scope: "project" | "global"; reason: string; recommend: boolean;
 }
-export interface CandidateExposure { candidateId: number; independenceKey: string; observationHighwater: number; created_at: number }
+export interface CandidateExposure { candidateId: number; textKey: string; independenceKey: string; observationHighwater: number; created_at: number }
 export interface CandidateSnapshot {
   candidates: Candidate[]; evaluations: CandidateEvaluation[]; exposures: CandidateExposure[]; highwater: number; marker: number;
 }
@@ -35,7 +35,8 @@ const nextId = (db: DatabaseSync, table: string) => Number(db.prepare(`SELECT co
 
 /** An observation made before disclosure remains independent; later repetitions do not. */
 export function observationExposed(snapshot: CandidateSnapshot, ids: number[], observation: CandidateObservation): boolean {
-  return snapshot.exposures.some((exposure) => ids.includes(exposure.candidateId) &&
+  const identities = new Set(snapshot.candidates.filter((candidate) => ids.includes(candidate.id)).map((candidate) => textHash(candidate.text)));
+  return snapshot.exposures.some((exposure) => identities.has(exposure.textKey) &&
     exposure.independenceKey === observation.independenceKey && observation.id > exposure.observationHighwater);
 }
 
@@ -66,6 +67,7 @@ export class CandidateStore {
         lesson_id INTEGER REFERENCES lessons(id), CHECK((status = 'pending') = (lesson_id IS NULL))
       ) WITHOUT ROWID;
       CREATE UNIQUE INDEX IF NOT EXISTS candidate_pending_identity ON candidates(project, requested_scope, text_key) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS candidate_text_identity ON candidates(text_key, id);
       CREATE TABLE IF NOT EXISTS candidate_observations (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
         candidate_id INTEGER NOT NULL REFERENCES candidates(id), wording TEXT NOT NULL, evidence TEXT NOT NULL,
@@ -184,11 +186,12 @@ export class CandidateStore {
   private observation(row: Row): CandidateObservation {
     const id = Number(row.id);
     const independenceKey = String(row.independence_key);
-    const exposure = this.db.prepare("SELECT observation_highwater FROM candidate_exposures WHERE candidate_id = ? AND independence_key = ?")
-      .get(Number(row.candidate_id), independenceKey);
+    const exposure = this.db.prepare(`SELECT min(e.observation_highwater) AS observation_highwater FROM candidate_exposures e
+      JOIN candidates disclosed ON disclosed.id = e.candidate_id JOIN candidates current ON current.id = ?
+      WHERE disclosed.text_key = current.text_key AND e.independence_key = ?`).get(Number(row.candidate_id), independenceKey);
     return { id, wording: String(row.wording), evidence: String(row.evidence), priority: Number(row.priority),
       basis: row.basis as NewLesson["basis"], origin: JSON.parse(String(row.origin)), created_at: Number(row.created_at),
-      independenceKey, exposed: !!exposure && id > Number(exposure.observation_highwater) };
+      independenceKey, exposed: exposure?.observation_highwater != null && id > Number(exposure.observation_highwater) };
   }
 
   counts(): { pending: number; sinceEvaluation: number } {
@@ -203,17 +206,20 @@ export class CandidateStore {
     this.db.exec("BEGIN");
     try {
       const candidates = this.readCandidates();
-      const exposures = this.db.prepare("SELECT * FROM candidate_exposures ORDER BY candidate_id, independence_key").all().map((row) => ({
-        candidateId: Number(row.candidate_id), independenceKey: String(row.independence_key),
+      const exposures = this.db.prepare(`SELECT e.*, c.text_key FROM candidate_exposures e JOIN candidates c ON c.id = e.candidate_id
+        WHERE EXISTS (SELECT 1 FROM candidates pending WHERE pending.status = 'pending' AND pending.text_key = c.text_key)
+        ORDER BY e.candidate_id, e.independence_key`).all().map((row) => ({
+        candidateId: Number(row.candidate_id), textKey: String(row.text_key), independenceKey: String(row.independence_key),
         observationHighwater: Number(row.observation_highwater), created_at: Number(row.created_at),
       }));
       const evaluations = this.db.prepare(`SELECT DISTINCT e.* FROM candidate_evaluations e
-        JOIN candidate_group_members m ON m.evaluation_id = e.id JOIN candidates c ON c.id = m.candidate_id
-        WHERE c.status = 'pending' ORDER BY e.id`).all().map((row): CandidateEvaluation => ({
+        JOIN candidate_group_members m ON m.evaluation_id = e.id JOIN candidates original ON original.id = m.candidate_id
+        JOIN candidates pending ON pending.text_key = original.text_key WHERE pending.status = 'pending' ORDER BY e.id`).all().map((row): CandidateEvaluation => ({
           id: Number(row.id), recorded_at: Number(row.recorded_at), highwater: Number(row.highwater), evaluator: JSON.parse(String(row.evaluator)),
           groups: this.db.prepare(`SELECT g.* FROM candidate_evaluation_groups g WHERE g.evaluation_id = ? AND EXISTS (
-            SELECT 1 FROM candidate_group_members m JOIN candidates c ON c.id = m.candidate_id
-            WHERE m.evaluation_id = g.evaluation_id AND m.group_index = g.group_index AND c.status = 'pending') ORDER BY g.group_index`)
+            SELECT 1 FROM candidate_group_members m JOIN candidates original ON original.id = m.candidate_id
+            JOIN candidates pending ON pending.text_key = original.text_key
+            WHERE m.evaluation_id = g.evaluation_id AND m.group_index = g.group_index AND pending.status = 'pending') ORDER BY g.group_index`)
             .all(Number(row.id)).map((group) => ({ group: {
               candidateIds: this.db.prepare("SELECT candidate_id FROM candidate_group_members WHERE evaluation_id = ? AND group_index = ? ORDER BY candidate_id")
                 .all(Number(row.id), Number(group.group_index)).map((member) => Number(member.candidate_id)),
@@ -229,23 +235,23 @@ export class CandidateStore {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  expose(snapshot: CandidateSnapshot, key: string): CandidateSnapshot {
+  expose(snapshot: CandidateSnapshot, key: string, beforeDisclosure?: (snapshot: CandidateSnapshot) => void): CandidateSnapshot {
     checkedText(key, "independence key", 300);
     return this.transaction(() => {
       this.validateFresh(snapshot);
       const watermark = Number(this.db.prepare("SELECT coalesce(max(id), 0) AS id FROM candidate_observations").get()!.id);
-      const exposures = [...snapshot.exposures];
-      let changed = false;
-      for (const candidate of snapshot.candidates) {
-        if (this.db.prepare("SELECT 1 FROM candidate_exposures WHERE candidate_id = ? AND independence_key = ?").get(candidate.id, key)) continue;
-        const created_at = Date.now();
-        this.db.prepare("INSERT INTO candidate_exposures VALUES (?, ?, ?, ?)").run(candidate.id, key, watermark, created_at);
-        exposures.push({ candidateId: candidate.id, independenceKey: key, observationHighwater: watermark, created_at });
-        changed = true;
-      }
-      if (changed) this.bumpMarker();
+      const additions = snapshot.candidates.filter((candidate) => !this.db.prepare(
+        "SELECT 1 FROM candidate_exposures WHERE candidate_id = ? AND independence_key = ?").get(candidate.id, key))
+        .map((candidate) => ({ candidateId: candidate.id, textKey: textHash(candidate.text), independenceKey: key,
+          observationHighwater: watermark, created_at: Date.now() }));
+      // Preflight the exact final payload before recording disclosure. Failure leaves both exposures and marker untouched.
+      const disclosed = { ...snapshot, exposures: [...snapshot.exposures, ...additions], marker: snapshot.marker + (additions.length ? 1 : 0) };
+      beforeDisclosure?.(disclosed);
+      for (const exposure of additions) this.db.prepare("INSERT INTO candidate_exposures VALUES (?, ?, ?, ?)")
+        .run(exposure.candidateId, exposure.independenceKey, exposure.observationHighwater, exposure.created_at);
+      if (additions.length) this.bumpMarker();
       // Keep the exact disclosed candidate set: unrelated concurrent additions remain new and unevaluated.
-      return { ...snapshot, exposures, marker: this.state("marker") };
+      return disclosed;
     });
   }
 

@@ -82,6 +82,29 @@ test("disclosure excludes future equivalent repetitions without erasing earlier 
   } finally { raw.close(); }
 });
 
+test("exposure survives promotion and recreated exact identities without changing existing active lessons", t => {
+  const root = dir(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new MemoryStore(join(root, "db")); t.after(() => store.close());
+  for (const session of ["original-a", "original-b"]) store.stageCandidate("/p/a", "project", lesson, origin(session), session);
+  const first = store.markCandidateExposure(store.candidateSnapshot(), "reviewer");
+  const promoted = store.completeCandidateEvaluation(first, origin("reviewer"), [{ ...group, candidateIds: first.candidates.map(c => c.id) }], [0]);
+  const lessonId = promoted[0].lessonId;
+  store.stageCandidate("/p/a", "project", lesson, origin("reviewer"), "reviewer");
+  store.stageCandidate("/p/a", "project", lesson, origin("fresh-peer"), "fresh-peer");
+  const recreated = store.candidateSnapshot();
+  assert.notEqual(recreated.candidates[0].id, first.candidates[0].id);
+  assert.equal(recreated.evaluations[0].groups[0].approved, true, "recreated identities retain previous grouping judgments");
+  assert.equal(recreated.candidates[0].observations[0].exposed, true);
+  assert.equal(store.qualifyCandidateGroup(recreated, recreated.candidates.map(c => c.id), "project").occurrences, 1,
+    "the promoted original's disclosure still excludes the evaluator's later repetition");
+  store.stageCandidate("/p/a", "project", lesson, origin("second-peer"), "second-peer");
+  const fresh = store.candidateSnapshot();
+  const repeated = store.completeCandidateEvaluation(fresh, origin("approver"), [{ ...group, priority: 8, candidateIds: fresh.candidates.map(c => c.id) }], [0]);
+  assert.deepEqual(repeated, [{ groupIndex: 0, lessonId, created: false }]);
+  assert.equal(store.get("/p/a", lessonId).priority, 5, "duplicate promotion cannot rerank an existing lesson");
+  assert.equal(store.history("/p/a", lessonId).events.length, 1);
+});
+
 test("schema 7 upgrades atomically to candidate schema 8",t=>{
  const root=dir();t.after(()=>rmSync(root,{recursive:true,force:true}));const path=join(root,"db");
  const first=new MemoryStore(path);first.add("/p/a",lesson,origin("x"));first.close();

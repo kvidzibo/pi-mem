@@ -193,19 +193,22 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const initial = value.store.candidateSnapshot();
     if (!initial.candidates.length) { show("No pending candidates to evaluate.", ctx); return; }
     const id = randomUUID();
-    const payload = stagedEvaluation(initial, id, value.limits);
-    const estimate = Math.ceil(payload.length / 4);
-    const used = ctx.getContextUsage?.()?.tokens ?? 0;
-    if (ctx.model && estimate + used + 4096 > ctx.model.contextWindow) {
-      throw new Error(`All candidates need approximately ${estimate} tokens plus conversation history. Start a fresh session or choose a larger-context model; no candidates were truncated.`);
-    }
+    let payload = "";
+    // Size the exact final snapshot (including new disclosure records) before committing any exposure.
+    const disclosed = value.store.markCandidateExposure(initial, independenceKey(ctx), (next) => {
+      payload = stagedEvaluation(next, id, value.limits);
+      const estimate = Math.ceil(payload.length / 4);
+      const used = ctx.getContextUsage?.()?.tokens ?? 0;
+      if (ctx.model && estimate + used + 4096 > ctx.model.contextWindow) {
+        throw new Error(`All candidates need approximately ${estimate} tokens plus conversation history. Start a fresh session or choose a larger-context model; no candidates were truncated.`);
+      }
+    });
     // Disclosure is durable even if the evaluation is later cancelled: this lineage has seen these candidates.
-    const disclosed = value.store.markCandidateExposure(initial, independenceKey(ctx));
     const evaluation = { id, snapshot: disclosed, state: value,
       generation, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, anchor: ctx.sessionManager.getLeafId() };
     pendingEvaluation = evaluation;
     auditTurnBlocked = true;
-    pi.sendMessage({ customType: "pi-mem-evaluation", content: stagedEvaluation(evaluation.snapshot, id, value.limits), display: true },
+    pi.sendMessage({ customType: "pi-mem-evaluation", content: payload, display: true },
       { triggerTurn: true, deliverAs: "followUp" });
   }
 
@@ -599,7 +602,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (approved === undefined) return result("cancelled", { message: "No candidates promoted; no similarity judgments saved" });
         const promoted = evaluation.state.store.completeCandidateEvaluation(evaluation.snapshot,
           { ...origin(ctx, _id), actor: "user" }, groups, approved);
-        recordSaved(promoted.filter((entry) => entry.created).map((entry) => entry.lessonId), ctx);
+        recordSaved(promoted.filter((entry) => {
+          const group = groups[entry.groupIndex];
+          const scope = group.scope === "global" ? GLOBAL_SCOPE
+            : evaluation.snapshot.candidates.find((candidate) => group.candidateIds.includes(candidate.id))!.project;
+          return entry.created && (scope === evaluation.state.scope || scope === GLOBAL_SCOPE);
+        }).map((entry) => entry.lessonId), ctx);
         try { snapshot(ctx); } catch { /* Committed evaluation remains successful if status refresh fails. */ }
         return result("evaluated", { promoted, candidates: evaluation.state.store.candidateCounts() });
       } finally {

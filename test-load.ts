@@ -10,6 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { formatTokens, memoryContext } from "./src/presentation.ts";
 import { buildAudit, stagedAudit } from "./src/audit.ts";
+import { stagedEvaluation } from "./src/evaluation.ts";
+import { DEFAULT_LIMITS } from "./src/limits.ts";
 import { Backups } from "./src/backups.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -318,12 +320,13 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
   process.env.PI_MEMORY_DB = join(directory, "db.sqlite3");
   const sent: Array<{ customType: string; content: string }> = [];
   const statuses: Array<string | undefined> = [];
+  const notices: string[] = [];
   const ctx = {
-    cwd: join(directory, "project"), hasUI: true, mode: "rpc",
+    cwd: join(directory, "project"), hasUI: true, mode: "rpc", model: undefined as { contextWindow: number } | undefined,
     sessionManager: { getSessionId: () => "candidate-session", getSessionFile: () => "/temporary/session.jsonl",
       getEntries: () => [], getLeafId: () => undefined, getBranch: () => [{ type: "message", message: { role: "assistant",
         provider: "candidate-provider", model: "candidate-model", content: [{ type: "toolCall", id: "candidate-call", name: "memory", arguments: {} }] } }] },
-    ui: { notify: () => {}, setStatus: (_key: string, text?: string) => statuses.push(text), editor: async (_title: string, text: string) => text,
+    ui: { notify: (text: string) => notices.push(text), setStatus: (_key: string, text?: string) => statuses.push(text), editor: async (_title: string, text: string) => text,
       select: async (_title: string, choices: string[]) => choices[0] },
   };
   mkdirSync(ctx.cwd);
@@ -367,6 +370,13 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
     assert.deepEqual(recalled.messages.slice(0, prefix.length), prefix, "candidate changes append after the existing cache prefix");
     ctx.sessionManager.getSessionId = () => "candidate-session";
+    const initialTokens = Math.ceil(stagedEvaluation(store.candidateSnapshot(), "_".repeat(36), DEFAULT_LIMITS).length / 4);
+    ctx.model = { contextWindow: initialTokens + 4096 };
+    await extension.commands.get("pi-mem").handler("evaluate", ctx);
+    assert.match(notices.at(-1)!, /larger-context model/);
+    assert.equal(sent.length, 0, "the final post-disclosure payload, not the smaller initial snapshot, must fit");
+    assert.equal(store.candidateSnapshot().exposures.length, 0, "failed preflight must not mark undisclosed candidates as exposed");
+    ctx.model = undefined;
     await extension.commands.get("pi-mem").handler("evaluate", ctx);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].customType, "pi-mem-evaluation");
@@ -403,6 +413,31 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     await assert.rejects(evaluator.execute("late-evaluation", late, undefined, undefined, ctx), /No matching pending evaluation/);
     await assert.rejects(execute("Compaction cannot unlock evaluation writes."), /review pending/);
     assert.deepEqual(store.candidateCounts(), { pending: 3, sinceEvaluation: 1 });
+    for (const handler of extension.handlers.get("before_agent_start") ?? []) await handler({ systemPrompt: "Base" }, ctx);
+    const foreign = join(directory, "other-project"); mkdirSync(foreign);
+    for (const session of ["foreign-a", "foreign-b"]) store.stageCandidate(foreign, "project",
+      { text: "Verify the foreign project's build configuration.", evidence: "Verified an independent build.", basis: "validated_fix", priority: 5 },
+      { harness: "test", session, actor: "model" }, session);
+    await extension.commands.get("pi-mem").handler("evaluate", ctx);
+    const foreignEvaluationId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent.at(-1)!.content)![1]);
+    const all = store.candidateSnapshot().candidates;
+    const foreignGroups = [{ ...validGroup, candidateIds: all.filter(candidate => candidate.project === ctx.cwd).map(candidate => candidate.id) },
+      { ...validGroup, text: "Verify the foreign project's build configuration.", recommend: true,
+        candidateIds: all.filter(candidate => candidate.project === foreign).map(candidate => candidate.id) }];
+    let selectedForeign = false;
+    ctx.ui.select = async (title: string, choices: string[]) => {
+      if (title.startsWith("Candidate group")) return "Yes — promote";
+      if (selectedForeign) return choices.at(-1)!;
+      selectedForeign = true; return choices[2];
+    };
+    const notificationsBeforePromotion = notices.length;
+    const approvedForeign = await evaluator.execute("foreign-evaluation", evaluator.prepareArguments({ evaluationId: foreignEvaluationId,
+      groups: foreignGroups }), undefined, undefined, ctx);
+    assert.equal(approvedForeign.details.promoted.length, 1);
+    assert.equal(store.list(foreign).total, 1);
+    assert.equal(store.list(ctx.cwd).total, 0);
+    assert.ok(notices.slice(notificationsBeforePromotion).every(notice => !notice.includes("chat entry failed")),
+      "other-project promotions must not try to render current-project chat cards");
   } finally {
     for (const handler of extension?.handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
     store?.close();
