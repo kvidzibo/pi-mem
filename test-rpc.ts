@@ -75,7 +75,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
           return;
         }
         browseRootSeen = true;
-        assert.equal(event.options?.length, 11);
+        assert.equal(event.options?.length, 12);
         assert.deepEqual(event.options?.slice(0, 3), ["Browse / search lessons", "Add lesson", "Archived lessons"]);
         value = "Browse / search lessons";
       } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
@@ -218,7 +218,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     const emptyMenu = events.find((event) => event.method === "select" && event.title?.startsWith("Memory · other"));
     assert.ok(emptyMenu);
     assert.match(emptyMenu!.title!, /0 active · 0 loaded into context/);
-    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Global lessons", "All projects", "Audit…", "Move memory", "Backups…", "Status & limits", "Reload memory", "Help"]);
+    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Global lessons", "All projects", "Evaluate candidates…", "Audit…", "Move memory", "Backups…", "Status & limits", "Reload memory", "Help"]);
     const recalled = await command("/pi-mem reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
     assert.match(recalled, /^Database: .+\nPROJECT LESSONS$/);
@@ -337,6 +337,130 @@ export default function(pi) {
     assert.equal(invalid.filter((event) => event.method === "select").length, 0, "boolean priorities must fail before schema coercion and approval");
     assert.ok(invalid.some((event) => event.type === "tool_execution_end" && event.isError && /priority must/.test(JSON.stringify(event.result))));
     assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
+    assert.ok(!events.some((event) => event.type === "extension_error"), client.getStderr());
+  } finally { await client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("real offline candidate tools preserve blind submissions and require individual RPC promotion approval", { timeout: 30000 }, async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-mem-candidate-rpc-")));
+  const project = join(directory, "project"); mkdirSync(project);
+  const database = join(directory, "lessons.sqlite3");
+  const store = new MemoryStore(database);
+  store.stageCandidate(project, "project", { text: "Back up SQLite before schema migrations.", evidence: "Verified recovery from a database snapshot.",
+    basis: "validated_fix", priority: 2 }, { harness: "test", session: "independent-peer", actor: "model" }, "independent-peer");
+  const provider = join(directory, "provider.ts");
+  writeFileSync(provider, `import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+export default function(pi) {
+  let discovered = false; const evaluated = new Set();
+  pi.registerProvider("candidate-test", { api: "candidate-test-api", baseUrl: "https://example.invalid", apiKey: "test-only",
+    models: [{ id: "candidate", name: "Offline candidates", reasoning: false, input: ["text"], contextWindow: 200000,
+      maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    streamSimple(model, context) {
+      const stream = createAssistantMessageEventStream();
+      const texts = context.messages.map(m => typeof m.content === "string" ? m.content :
+        (Array.isArray(m.content) ? m.content.filter(p => p.type === "text").map(p => p.text).join("\\n") : ""));
+      const text = texts.filter(s => s.includes("with evaluationId")).at(-1) || "";
+      const token = /with evaluationId ("[^"]+")/.exec(text); const evaluationId = token ? JSON.parse(token[1]) : undefined;
+      const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(),
+        content: [], stopReason: "pending", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      stream.push({ type: "start", partial: message });
+      let call;
+      if (evaluationId && !evaluated.has(evaluationId)) {
+        evaluated.add(evaluationId);
+        const data = JSON.parse(text.split("\`\`\`json\\n")[1].split("\\n\`\`\`")[0]);
+        call = { type: "toolCall", id: "evaluate-" + evaluationId, name: "memory_evaluate", arguments: { evaluationId, groups: [{
+          candidateIds: data.candidates.map(c => c.id), text: "Back up SQLite before applying schema migrations.",
+          evidence: "Independent recovery checks verified database snapshots.", priority: 2, scope: "project",
+          reason: "Equivalent database precaution verified independently.", recommend: true }] } };
+      } else if (!discovered && texts.some(s => s.includes("Record the independently verified migration precaution."))) {
+        discovered = true;
+        call = { type: "toolCall", id: "candidate-discovery", name: "memory", arguments: { action: "add", scope: "project",
+          text: "Snapshot SQLite before applying migrations.", evidence: "Verified restoring the database after migration failure.",
+          basis: "validated_fix", priority: 2 } };
+      }
+      if (call) {
+        message.content.push(call); stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+        stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(call.arguments), partial: message });
+        stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: message }); message.stopReason = "toolUse";
+      } else {
+        const content = texts.some(s => s.includes("SESSION CANDIDATES")) ? "Own provisional recall present." : "No provisional recall.";
+        message.content.push({ type: "text", text: content }); message.stopReason = "stop";
+        stream.push({ type: "text_start", contentIndex: 0, partial: message });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: content, partial: message });
+        stream.push({ type: "text_end", contentIndex: 0, content, partial: message });
+      }
+      stream.push({ type: "done", reason: message.stopReason, message }); stream.end(); return stream;
+    }
+  });
+}
+`);
+  const { RpcClient } = await import(pathToFileURL(join(DIST, "modes/rpc/rpc-client.js")).href);
+  const client = new RpcClient({ cliPath: join(DIST, "bundle/cli.js"), cwd: project, provider: "candidate-test", model: "candidate",
+    env: { ...Object.fromEntries(Object.keys(process.env).map((key) => [key, ""])), PATH: process.env.PATH ?? "",
+      HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_MEMORY_DB: database,
+      PI_OFFLINE: "1", PI_TELEMETRY: "0" },
+    args: ["--offline", "--no-approve", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-extensions",
+      "-e", join(ROOT, "src/index.ts"), "-e", provider] });
+  const events: any[] = [];
+  let ended: (() => void) | undefined;
+  let promote = false, inspected = false;
+  client.onEvent((event: any) => {
+    events.push(event);
+    if (event.type === "agent_end") ended?.();
+    if (event.type === "extension_ui_request" && event.method === "select") {
+      let value: string;
+      if (event.title.startsWith("Review candidate evaluation")) {
+        assert.equal(store.list(project).total, 0, "Yes selections must not write before Finish");
+        value = inspected ? event.options.find((option: string) => option.startsWith("Finish evaluation")) : event.options[1];
+      } else {
+        assert.match(event.title, /^Candidate group/);
+        assert.match(event.title, /Independent occurrences: 2\/2/);
+        assert.match(event.title, /Verified recovery from a database snapshot/);
+        assert.match(event.title, /Verified restoring the database after migration failure/);
+        assert.match(event.title, /First added: \d{4}-/);
+        assert.ok(event.options.includes("Yes — promote"));
+        inspected = true; value = promote ? "Yes — promote" : "No — keep pending";
+      }
+      client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, value }) + "\n");
+    }
+  });
+  const turn = async (prompt: string) => {
+    const start = events.length;
+    const finished = new Promise<void>((resolve) => { ended = resolve; });
+    await client.prompt(prompt); await finished;
+    return events.slice(start);
+  };
+  try {
+    await client.start();
+    const discovery = await turn("Record the independently verified migration precaution.");
+    const staged = discovery.find((event) => event.type === "tool_execution_end" && event.toolName === "memory");
+    assert.equal(staged.result.details.status, "candidate staged");
+    assert.doesNotMatch(JSON.stringify(staged.result), /independent-peer|occurrences|candidateIds/);
+    assert.equal(store.list(project).total, 0);
+    assert.deepEqual(store.candidateCounts(), { pending: 2, sinceEvaluation: 2 });
+    const owned = store.ownCandidates(project, (await client.getState()).sessionId);
+    assert.equal(owned.length, 1);
+    assert.equal(owned[0].observations[0].origin.model, "candidate");
+    assert.equal(owned[0].observations[0].origin.provider, "candidate-test");
+    assert.match(JSON.stringify(await client.getMessages()), /Own provisional recall present/);
+    await client.newSession();
+    await turn("Check session isolation.");
+    assert.match(JSON.stringify(await client.getMessages()), /No provisional recall/);
+    const declined = await turn("/pi-mem evaluate");
+    assert.ok(declined.some((event) => event.type === "tool_execution_end" && event.result.details.status === "evaluated"));
+    assert.deepEqual(store.candidateCounts(), { pending: 2, sinceEvaluation: 0 });
+    assert.equal(store.candidateSnapshot().evaluations[0].groups[0].approved, false);
+    assert.equal(store.list(project).total, 0);
+    promote = true; inspected = false;
+    const approved = await turn("/pi-mem evaluate");
+    assert.ok(approved.some((event) => event.type === "tool_execution_end" && event.result.details.promoted.length === 1));
+    assert.deepEqual(store.candidateCounts(), { pending: 0, sinceEvaluation: 0 });
+    const lesson = [...store.recall(project).lessons][0];
+    assert.equal(lesson.text, "Back up SQLite before applying schema migrations.");
+    assert.equal(store.history(project, lesson.id).events[0].actor, "user");
+    assert.equal(store.history(project, lesson.id).events[0].model, "candidate");
+    assert.ok(approved.some((event) => event.method === "setStatus" && /🌱 0 \(\+0\)/.test(event.statusText)));
     assert.ok(!events.some((event) => event.type === "extension_error"), client.getStderr());
   } finally { await client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

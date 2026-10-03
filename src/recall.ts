@@ -5,7 +5,7 @@ export const CONTEXT_TYPE = "pi-mem-context";
 type Message = ContextEvent["messages"][number];
 export type RecallSnapshot = {
   text: string;
-  lessons: Array<{ id: number; heading: string; line: string }>;
+  lessons: Array<{ id: number | string; heading: string; line: string }>;
   notices: string[];
 };
 

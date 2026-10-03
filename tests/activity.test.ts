@@ -82,7 +82,7 @@ test("activity follows every mutation atomically, remains immutable, and migrate
   // Reconstruct a v6 fixture by removing only the newly introduced table.
   raw.exec("DROP TABLE activity; PRAGMA user_version = 6");
   store = new MemoryStore(path);
-  assert.equal(raw.prepare("PRAGMA user_version").get()!.user_version, 7);
+  assert.equal(raw.prepare("PRAGMA user_version").get()!.user_version, 8);
   const recovered = store.history(scope, first.id).events;
   assert.ok(recovered.every((event) => event.historical && event.actor === "unknown" && event.model === null));
   assert.equal(recovered.filter((event) => event.action === "set_priority").length, 2);

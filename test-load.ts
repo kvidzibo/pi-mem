@@ -57,7 +57,8 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     // Match Pi's documented character-count heuristic against the actual injected SQLite block.
     const tokens = formatTokens(Math.ceil(text.length / 4));
     const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
-    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded}|0${changes ? ` (${changes})` : ""} ~${tokens} \x1b[0m`);
+    const candidates = inspection?.candidateCounts() ?? { pending: 0, sinceEvaluation: 0 };
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 ${loaded}|0${changes ? ` (${changes})` : ""} ~${tokens} · 🌱 ${candidates.pending} (+${candidates.sinceEvaluation}) \x1b[0m`);
   };
   const savedEntries = (): CustomEntry[] => extension.sessionLog.getEntries().filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-saved");
   const event = async (name: string, value: object = {}) => {
@@ -67,7 +68,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
   };
   try {
     extension = await load();
-    assert.deepEqual([...extension.tools.keys()], ["memory", "memory_audit"]);
+    assert.deepEqual([...extension.tools.keys()], ["memory", "memory_audit", "memory_evaluate"]);
     assert.deepEqual([...extension.commands.keys()], ["pi-mem"]);
     assert.equal(existsSync(process.env.PI_MEMORY_DB), false, "factory loading must not open a database");
     await event("session_start", { reason: "startup" });
@@ -82,12 +83,10 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
       /Maximum 20 words per lesson and 20 words for evidence/);
-    const saved = JSON.parse((await execute(input)).content[0].text);
+    await extension.commands.get("pi-mem").handler("add Test startup recall.", ctx);
+    const saved = JSON.parse(notices.at(-1)!);
     assert.equal(saved.status, "saved");
-    const creation = inspection.history(ctx.cwd, saved.id).events[0];
-    assert.equal(creation.actor, "model");
-    assert.equal(creation.provider, "test-provider");
-    assert.equal(creation.model, "issuing-model");
+    assert.equal(inspection.history(ctx.cwd, saved.id).events[0].actor, "user");
     const reprioritized = JSON.parse((await execute({ action: "set_priority", id: saved.id, priority: 3,
       reason: "Frequently recurring failure." })).content[0].text);
     assert.equal(reprioritized.priority, 3);
@@ -104,7 +103,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
       await assert.rejects(execute({ ...input, priority }), /priority must/);
     }
     await assert.rejects(execute({ ...input, priority: undefined }), /priority must/);
-    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ $/, "saving refreshes the footer immediately");
+    assert.match(stripVTControlCharacters(statuses.at(-1)!), /^ 🧠 1\|0 \(\+1\) ~[\d,]+ · 🌱 0 \(\+0\) $/, "saving refreshes the footer immediately");
     assert.equal(savedEntries().length, 1);
     assert.deepEqual(savedEntries()[0].data, [{ id: saved.id, text: input.text, supersedes_id: null }]);
     const renderer = extension.entryRenderers.get("pi-mem-saved");
@@ -116,15 +115,16 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
       assert.ok(component.render(width).every((line: string) => visibleWidth(line) <= width));
     }
     assert.deepEqual(extension.sessionLog.buildSessionContext().messages, [], "save cards must never enter model context");
-    assert.equal(JSON.parse((await execute(input)).content[0].text).status, "already exists");
+    await extension.commands.get("pi-mem").handler("add Test startup recall.", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).status, "already exists");
     assert.equal(savedEntries().length, 1, "duplicates must not create chat entries");
-    assert.match(statuses.at(-1)!, /\(\+1\)/);
+    assert.match(statuses.at(-1)!, /\(\+1\)/, "duplicates do not increment the active-save count");
+    assert.match(statuses.at(-1)!, /· 🌱 0 \(\+0\)/);
     assert.match(JSON.stringify(tool.parameters.properties.basis), /"validated_learning"/);
-    const learned = JSON.parse((await execute({ ...input, basis: "validated_learning",
-      text: "Build assets before packaging.", evidence: "Verified the build dependency." })).content[0].text);
+    await extension.commands.get("pi-mem").handler("add Build assets before packaging.", ctx);
+    const learned = JSON.parse(notices.at(-1)!);
     assert.equal(learned.status, "saved");
     const original = inspection.get(ctx.cwd, learned.id);
-    assert.equal(original.basis, "validated_learning");
     const user = { role: "user", content: "Continue", timestamp: 1 };
     let recall = await event("context", { messages: [user] });
     assert.match(recall.messages[0].content, /Test startup recall/);
@@ -211,8 +211,9 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     await assert.rejects(execute({ ...input, basis: "validated_learning" }), /Ephemeral sessions/);
     await assert.rejects(execute({ ...input, action: "supersede", id: replacement.id }), /Ephemeral sessions/);
     await assert.rejects(execute({ action: "archive", id: replacement.id }), /Ephemeral sessions/);
-    ctx.hasUI = false;
-    assert.equal(JSON.parse((await execute({ ...input, basis: "user_request" })).content[0].text).status, "saved");
+    ctx.hasUI = true;
+    await command.handler("add Explicit command lesson.", ctx);
+    assert.equal(JSON.parse(notices.at(-1)!).status, "saved");
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await assert.rejects(execute({ ...input, basis: "user_request", text: "Must not save" }, controller.signal), /cancelled/);
@@ -222,7 +223,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     assert.equal(JSON.parse(notices.at(-1)!).total, 1);
     await command.handler("add Saved by a command.", ctx);
     assert.equal(JSON.parse(notices.at(-1)!).status, "saved");
-    assert.equal(savedEntries().length, 5, "headless tool and direct command saves are logged too");
+    assert.equal(savedEntries().length, 5, "direct command saves are logged too");
     await event("session_shutdown", { reason: "quit" });
     await event("session_shutdown", { reason: "quit" });
     delete process.env.PI_MEMORY_DB;
@@ -298,11 +299,113 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     await command.handler("reload", ctx);
     const combined = (await event("context", { messages: [] })).messages[0].content;
     assert.match(combined, /^GLOBAL LESSONS[\s\S]*lessons omitted[\s\S]*PROJECT LESSONS[\s\S]*lessons omitted/);
-    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+8 -3) ~${formatTokens(Math.ceil(combined.length / 4))} \x1b[0m`,
+    assert.equal(statuses.at(-1), `\x1b[0m 🧠 1|1 (+8 -3) ~${formatTokens(Math.ceil(combined.length / 4))} · 🌱 0 (+0) \x1b[0m`,
       "footer splits loaded scopes, combines changes/tokens, and hides omission totals");
   } finally {
     await event("session_shutdown", { reason: "quit" });
     inspection?.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real Pi loader: model additions stage session candidates and evaluation exports the complete snapshot", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-mem-candidates-"));
+  const previous = { PI_MEMORY_DB: process.env.PI_MEMORY_DB, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+  process.env.PI_CODING_AGENT_DIR = directory;
+  process.env.PI_MEMORY_DB = join(directory, "db.sqlite3");
+  const sent: Array<{ customType: string; content: string }> = [];
+  const statuses: Array<string | undefined> = [];
+  const ctx = {
+    cwd: join(directory, "project"), hasUI: true, mode: "rpc",
+    sessionManager: { getSessionId: () => "candidate-session", getSessionFile: () => "/temporary/session.jsonl",
+      getEntries: () => [], getLeafId: () => undefined, getBranch: () => [{ type: "message", message: { role: "assistant",
+        provider: "candidate-provider", model: "candidate-model", content: [{ type: "toolCall", id: "candidate-call", name: "memory", arguments: {} }] } }] },
+    ui: { notify: () => {}, setStatus: (_key: string, text?: string) => statuses.push(text), editor: async (_title: string, text: string) => text,
+      select: async (_title: string, choices: string[]) => choices[0] },
+  };
+  mkdirSync(ctx.cwd);
+  let extension: Awaited<ReturnType<typeof load>>;
+  let store: MemoryStore | undefined;
+  try {
+    extension = await load();
+    extension.runtime.sendMessage = (message: { customType: string; content: string }) => { sent.push(message); };
+    await (async () => { for (const handler of extension.handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx); })();
+    const tool = extension.tools.get("memory").definition;
+    const execute = async (text: string, session = "candidate-session") => {
+      ctx.sessionManager.getSessionId = () => session;
+      return tool.execute("candidate-call", tool.prepareArguments({ action: "add", text, evidence: "Reproduced with the integration fixture.",
+        basis: "validated_learning", priority: 6 }), undefined, undefined, ctx);
+    };
+    ctx.hasUI = false;
+    const first = JSON.parse((await execute("Build assets before packaging.")).content[0].text);
+    assert.equal(first.status, "candidate staged", "headless model additions still stage candidates");
+    assert.equal("id" in first, false);
+    ctx.hasUI = true;
+    assert.equal(JSON.parse((await execute("Build assets before packaging.")).content[0].text).status, "candidate staged");
+    assert.equal(statuses.at(-1)?.includes("🌱 1 (+1)"), true);
+    store = new MemoryStore(process.env.PI_MEMORY_DB);
+    const snapshot = store.candidateSnapshot();
+    assert.equal(snapshot.candidates.length, 1);
+    assert.equal(store.list(ctx.cwd).total, 0, "model additions never create active lessons");
+    assert.equal(store.ownCandidates(ctx.cwd, "candidate-session").length, 1);
+    assert.equal(store.ownCandidates(ctx.cwd, "another-session").length, 0, "candidate recall is isolated to its issuing session");
+    const candidate = snapshot.candidates[0];
+    assert.equal(candidate.text, "Build assets before packaging.");
+    assert.equal(candidate.basis, "validated_learning");
+    assert.equal(candidate.observations[0].origin.provider, "candidate-provider");
+    assert.equal(candidate.observations[0].origin.model, "candidate-model");
+    const contextEvent = { messages: [{ role: "user", content: "Continue", timestamp: 1 }] };
+    let recalled: any = contextEvent;
+    for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
+    assert.match(recalled.messages[0].content, /SESSION CANDIDATES[\s\S]*Build assets before packaging\. #C1/);
+    assert.doesNotMatch(JSON.stringify(recalled.messages), /Reproduced with the integration fixture/);
+    const prefix = structuredClone(recalled.messages);
+    await execute("Cache-safe independent observation.");
+    for (const handler of extension.handlers.get("context") ?? []) recalled = await handler(recalled, ctx);
+    assert.deepEqual(recalled.messages.slice(0, prefix.length), prefix, "candidate changes append after the existing cache prefix");
+    ctx.sessionManager.getSessionId = () => "candidate-session";
+    await extension.commands.get("pi-mem").handler("evaluate", ctx);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].customType, "pi-mem-evaluation");
+    assert.match(sent[0].content, /Build assets before packaging/);
+    assert.match(sent[0].content, /Cache-safe independent observation/);
+    const evaluationId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent[0].content)![1]);
+    const evaluator = extension.tools.get("memory_evaluate").definition;
+    const validGroup = { candidateIds: store.candidateSnapshot().candidates.map((item) => item.id), text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.",
+      priority: 6, scope: "project", reason: "Independent validated observation.", recommend: false };
+    assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, candidateIds: [true] }] }), /candidateIds|integer/);
+    assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, priority: true }] }), /priority|integer/);
+    assert.throws(() => evaluator.prepareArguments({ evaluationId, groups: [{ ...validGroup, recommend: "false" }] }), /recommend|boolean/);
+    const prepared = evaluator.prepareArguments({ evaluationId, groups: [validGroup] });
+    let reviewStep = 0;
+    ctx.ui.select = async (title: string, choices: string[]) => {
+      if (title.startsWith("Candidate group")) return choices.find((choice) => choice.startsWith("No — keep pending"))!;
+      return reviewStep++ === 0 ? choices[1] : choices[choices.length - 1]!;
+    };
+    const evaluated = await evaluator.execute("evaluation-call", prepared, undefined, undefined, ctx);
+    assert.equal(evaluated.details.status, "evaluated");
+    assert.deepEqual(store.candidateCounts(), { pending: 2, sinceEvaluation: 0 }, "No retains candidates, and only Finish resets +new");
+    assert.equal(store.list(ctx.cwd).total, 0, "No selections produce no active lessons");
+    assert.equal(store.candidateSnapshot().evaluations[0].groups[0].group.text, validGroup.text,
+      "declined similarity judgments are retained for the next evaluation");
+    await assert.rejects(execute("Do not stage during the evaluation continuation."), /review pending/);
+    for (const handler of extension.handlers.get("before_agent_start") ?? []) await handler({ systemPrompt: "Base" }, ctx);
+    await execute("New post-evaluation discovery.");
+    await extension.commands.get("pi-mem").handler("evaluate", ctx);
+    assert.deepEqual(store.candidateCounts(), { pending: 3, sinceEvaluation: 1 }, "dispatch alone does not reset new candidates");
+    const nextId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent.at(-1)!.content)![1]);
+    const late = evaluator.prepareArguments({ evaluationId: nextId, groups: [{ ...validGroup,
+      candidateIds: store.candidateSnapshot().candidates.map((candidate) => candidate.id) }] });
+    for (const handler of extension.handlers.get("session_compact") ?? []) await handler({}, ctx);
+    await assert.rejects(evaluator.execute("late-evaluation", late, undefined, undefined, ctx), /No matching pending evaluation/);
+    await assert.rejects(execute("Compaction cannot unlock evaluation writes."), /review pending/);
+    assert.deepEqual(store.candidateCounts(), { pending: 3, sinceEvaluation: 1 });
+  } finally {
+    for (const handler of extension?.handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
+    store?.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
@@ -393,7 +496,8 @@ test("real Pi loader: lesson changes append deltas without rewriting earlier req
     const empty = (await event("context", { messages: [] })).messages;
     assert.equal(empty.length, 1);
     assert.deepEqual((await event("context", { messages: [] })).messages, empty);
-    assert.deepEqual(extension.sessionLog.getEntries(), [], "recall overlays must not persist or trigger turns");
+    assert.ok(extension.sessionLog.getEntries().every((entry: SessionEntry) => entry.type === "custom" && entry.customType === "pi-mem-discovery-lineage"),
+      "recall overlays do not persist; only discovery-lineage markers are durable");
   } finally {
     await event("session_shutdown");
     db.close();

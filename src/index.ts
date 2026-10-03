@@ -8,6 +8,8 @@ import { memoryConfig } from "./config.ts";
 import { Backups, backupReport } from "./backups.ts";
 import { auditChanges, auditReview, buildAudit, stagedAudit, writeAudit } from "./audit.ts";
 import { menuChoice } from "./menu-ui.ts";
+import { evaluationGroups, reviewEvaluation, stagedEvaluation } from "./evaluation.ts";
+import type { CandidateSnapshot } from "./candidates.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
@@ -20,7 +22,8 @@ type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string;
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const BACKUP_TYPE = "pi-mem-backup-report";
-const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "audit", "reload", "help"];
+const LINEAGE_TYPE = "pi-mem-discovery-lineage";
+const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "evaluate", "audit", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
   "/pi-mem global add|list|archived|search … — manage global lessons; ID commands resolve project or global lessons",
@@ -31,6 +34,8 @@ const HELP = [
   "/pi-mem move <id> <destination-path|--global|--project> — move lesson and linked history; --project means current project; preserve IDs",
   "/pi-mem audit [--all-projects] [--file <path>] — agent proposal with Apply all / Cancel; file export is recommendations only",
   "/pi-mem audit cancel — discard a pending audit or close its approval dialog",
+  "/pi-mem evaluate — evaluate all pending candidates with the current model; review individual Yes / No promotions",
+  "/pi-mem evaluate cancel — discard a pending evaluation or close its review",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -44,11 +49,20 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let auditTurnBlocked = false;
   let backupShown = false;
   let pendingAudit: { id: string; snapshot: AuditSnapshot; state: MenuState; generation: number; session: string; cwd: string; anchor: string | null } | undefined;
+  let pendingEvaluation: { id: string; snapshot: CandidateSnapshot; state: MenuState; generation: number; session: string; cwd: string; anchor: string | null } | undefined;
   const recallContext = new RecallContext();
+
+  function independenceKey(ctx: ExtensionContext): string {
+    // A durable non-context marker follows copied branches, so forks cannot multiply discovery votes.
+    const entry = ctx.sessionManager.getBranch().find((entry) => entry.type === "custom" && entry.customType === LINEAGE_TYPE);
+    const root = entry?.type === "custom" ? (entry.data as { root?: unknown })?.root : undefined;
+    return typeof root === "string" && root.length > 0 && root.length <= 160 ? root : ctx.sessionManager.getSessionId();
+  }
 
   function reset() {
     generation++;
     pendingAudit = undefined;
+    pendingEvaluation = undefined;
     menu?.abort(new Error("Session or memory configuration changed; menu closed"));
     state?.store.close();
     state = undefined;
@@ -102,14 +116,28 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const project = memoryContext(page, limits.maxRecallBytes);
     const globalPage = store.recall(GLOBAL_SCOPE);
     const global = memoryContext(globalPage, globalRecallBytes(limits.maxRecallBytes), "GLOBAL LESSONS");
+    const provisionalHeading = "SESSION CANDIDATES (provisional; not shared memory)";
+    const provisional: RecallSnapshot["lessons"] = [];
+    let provisionalBytes = Buffer.byteLength(provisionalHeading) + 1;
+    const owned = store.ownCandidates(scope, ctx.sessionManager.getSessionId());
+    for (const candidate of owned) {
+      const wording = (candidate.observations[0]?.wording ?? candidate.text).replace(/\s+/gu, " ").trim();
+      const line = `- [P${candidate.priority}] ${wording} #C${candidate.id}`;
+      const bytes = Buffer.byteLength(line) + 1;
+      if (provisional.length >= limits.maxRecallLessons || provisionalBytes + bytes > limits.maxRecallBytes) break;
+      provisional.push({ id: `C${candidate.id}`, heading: provisionalHeading, line });
+      provisionalBytes += bytes;
+    }
+    const provisionalText = provisional.length ? [provisionalHeading, ...provisional.map((candidate) => candidate.line)].join("\n") : "";
     const result = {
-      text: globalPage.total ? `${global.text}\n\n${project.text}` : project.text,
+      text: [globalPage.total ? global.text : "", project.text, provisionalText].filter(Boolean).join("\n\n"),
       loaded: project.loaded + global.loaded,
       loadedIds: [...global.loadedIds, ...project.loadedIds],
-      lessons: [...global.lessons, ...project.lessons],
+      lessons: [...global.lessons, ...project.lessons, ...provisional],
       notices: [
         ...(globalPage.total > global.loaded ? [`GLOBAL LESSONS: ${globalPage.total - global.loaded} lessons omitted.`] : []),
         ...(page.total > project.loaded ? [`PROJECT LESSONS: ${page.total - project.loaded} lessons omitted.`] : []),
+        ...(owned.length > provisional.length ? [`SESSION CANDIDATES: ${owned.length - provisional.length} candidates omitted.`] : []),
       ],
     };
     if (ctx.hasUI) {
@@ -122,7 +150,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const changes = [added ? `+${added}` : "", archived ? `-${archived}` : ""].filter(Boolean).join(" ");
       const count = `${project.loaded}|${global.loaded}`;
       // Pi trims each status; ANSI reset guards preserve the surrounding visible spaces.
-      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} \x1b[0m`);
+      const candidates = store.candidateCounts();
+      ctx.ui.setStatus("pi-mem", `\x1b[0m 🧠 ${count}${changes ? ` (${changes})` : ""} ~${formatTokens(tokens)} · 🌱 ${candidates.pending} (+${candidates.sinceEvaluation}) \x1b[0m`);
     }
     notified = undefined;
     return result;
@@ -145,7 +174,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   }
 
   function sendAudit(allProjects: boolean, ctx: ExtensionContext) {
-    if (menu) throw new Error("Close the memory review before starting another audit");
+    if (menu || pendingEvaluation) throw new Error("Close or cancel the pending memory review before starting another audit");
     const value = current(ctx);
     const id = randomUUID();
     const audit = { id, snapshot: value.store.auditSnapshot(value.scope, allProjects), state: value,
@@ -154,6 +183,29 @@ export default function memoryExtension(pi: ExtensionAPI) {
     auditTurnBlocked = true;
     // Deliberate model-visible audit; the menu has closed before dispatch. Never parse a Markdown reply.
     pi.sendMessage({ customType: "pi-mem-audit", content: stagedAudit(audit.snapshot, id), display: true },
+      { triggerTurn: true, deliverAs: "followUp" });
+  }
+
+  function sendEvaluation(ctx: ExtensionContext) {
+    if (menu || pendingAudit || pendingEvaluation) throw new Error("Close or cancel the pending memory review before evaluating candidates");
+    if (!ctx.hasUI) throw new Error("Candidate promotion requires interactive or RPC UI");
+    const value = current(ctx);
+    const initial = value.store.candidateSnapshot();
+    if (!initial.candidates.length) { show("No pending candidates to evaluate.", ctx); return; }
+    const id = randomUUID();
+    const payload = stagedEvaluation(initial, id, value.limits);
+    const estimate = Math.ceil(payload.length / 4);
+    const used = ctx.getContextUsage?.()?.tokens ?? 0;
+    if (ctx.model && estimate + used + 4096 > ctx.model.contextWindow) {
+      throw new Error(`All candidates need approximately ${estimate} tokens plus conversation history. Start a fresh session or choose a larger-context model; no candidates were truncated.`);
+    }
+    // Disclosure is durable even if the evaluation is later cancelled: this lineage has seen these candidates.
+    const disclosed = value.store.markCandidateExposure(initial, independenceKey(ctx));
+    const evaluation = { id, snapshot: disclosed, state: value,
+      generation, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, anchor: ctx.sessionManager.getLeafId() };
+    pendingEvaluation = evaluation;
+    auditTurnBlocked = true;
+    pi.sendMessage({ customType: "pi-mem-evaluation", content: stagedEvaluation(evaluation.snapshot, id, value.limits), display: true },
       { triggerTurn: true, deliverAs: "followUp" });
   }
 
@@ -246,6 +298,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (menu === controller) menu = undefined;
       }
       if (action && typeof action === "object") { sendAudit(action.audit.allProjects, ctx); return; }
+      if (action === "evaluate") { sendEvaluation(ctx); return; }
       if (action !== "reload") return;
       reset();
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
@@ -255,6 +308,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     recallContext.reset();
     reset();
+    if (!ctx.sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === LINEAGE_TYPE)) {
+      pi.appendEntry(LINEAGE_TYPE, { root: ctx.sessionManager.getSessionId() });
+    }
     recall(ctx);
     backupShown = false;
     if (event.reason === "reload" && ctx.hasUI) {
@@ -305,7 +361,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event, ctx) => {
     // Only a fresh prompt releases the run-level barrier. Reload, navigation, compaction and automatic retries do not.
-    if (!pendingAudit && !auditController && !menu) auditTurnBlocked = false;
+    if (!pendingAudit && !pendingEvaluation && !auditController && !menu) auditTurnBlocked = false;
     try {
       const { limits } = current(ctx);
       return { systemPrompt: event.systemPrompt + "\n\nFor memory add/supersede: save one actionable point, preferably one sentence. " +
@@ -320,6 +376,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   const invalidateAudit = () => {
     pendingAudit = undefined;
+    pendingEvaluation = undefined;
     menu?.abort(new Error("Session branch changed; memory review cancelled"));
     recallContext.reset();
   };
@@ -338,7 +395,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory",
     label: "Memory",
-    description: "Write project or global lessons. Active lessons are recalled automatically; no on-demand reads. " +
+    description: "Stage new project or global lessons as session-local candidates; only user-approved promotions become shared memory. " +
+      "Candidates are provisional and recalled only to their originating session. Similar candidates are evaluated through /pi-mem evaluate, not exposed to submitting agents. " +
+      "Active lessons are recalled automatically; no on-demand reads. " +
       "Choose global scope for cross-project lessons or unrelated CLI usage; otherwise use project (default). " +
       "ID-based actions retain scope and target only current-project or global lessons. " +
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
@@ -351,9 +410,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "1–2: serious damage or corruption; 3–4: recurring failures or expensive debugging; " +
       "5–6: useful recurring knowledge; 7–8: narrow quirks; 9–10: marginal future value. " +
       "supersede inherits priority unless supplied; priority 0 is user-reserved and preserved when superseding. " +
-      "Lesson content is retained: supersede rather than edit it; no restore or delete. Exact active duplicates are not added. " +
+      "Lesson content is retained: supersede rather than edit it; no restore or delete. Repeated candidate submissions do not add independent votes. " +
       "No secrets or raw transcripts. In ephemeral sessions, writes require basis=user_request.",
-    promptSnippet: "Add, supersede, archive, or reprioritize project and global lessons",
+    promptSnippet: "Stage memory candidates, or supersede, archive, or reprioritize active lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
       scope: Type.Optional(StringEnum(["project", "global"] as const, {
@@ -378,12 +437,22 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
-      if (pendingAudit || menu || auditTurnBlocked) throw new Error("Memory review pending; submit the audit through memory_audit and await user approval");
+      if (pendingAudit || pendingEvaluation || menu || auditTurnBlocked) throw new Error("Memory review pending; submit the staged review and await user approval");
       const { store, scope } = current(ctx);
       if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
       }
-      const result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);
+      let result;
+      if (params.action === "add") {
+        if (params.scope !== undefined && params.scope !== "project" && params.scope !== "global") throw new Error("scope must be project or global");
+        if (params.basis !== "validated_learning" && params.basis !== "validated_fix" && params.basis !== "user_request") {
+          throw new Error("add requires basis: validated_learning, validated_fix, or user_request");
+        }
+        checkedPriority(params.priority, 1);
+        store.stageCandidate(scope, params.scope ?? "project", { text: params.text!, evidence: params.evidence!,
+          basis: params.basis, priority: params.priority }, { ...origin(ctx, _id), reason: params.reason }, independenceKey(ctx));
+        result = { status: "candidate staged", message: "Provisional for this session only; evaluate candidates and approve promotion to share it." };
+      } else result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);
       // Saving succeeded even if a later status/recall refresh fails; report the commit accurately.
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
@@ -468,6 +537,79 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "memory_evaluate",
+    label: "Candidate evaluation proposal",
+    description: "Submit the complete structured proposal for the current user-requested candidate evaluation. " +
+      "Use evaluationId from the staged export and partition all supplied candidate IDs exactly once into equivalent groups or singletons. " +
+      "Propose clearer combined wording without unsupported claims. Previous similarity judgments are suggestions. " +
+      "No candidates are promoted without individual Yes selections and Finish evaluation in the UI. No keeps candidates pending. " +
+      "Only exported candidates are eligible; configured independent-occurrence and distinct-project thresholds are enforced. " +
+      "Never apply proposals through memory or shell commands.",
+    parameters: Type.Object({
+      evaluationId: Type.String({ minLength: 1, maxLength: 80 }),
+      groups: Type.Array(Type.Object({
+        candidateIds: Type.Array(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), { minItems: 1, maxItems: 10000 }),
+        text: Type.String({ minLength: 1, maxLength: MAX_TEXT }),
+        evidence: Type.String({ minLength: 1, maxLength: MAX_EVIDENCE }),
+        priority: Type.Integer({ minimum: 1, maximum: 10 }),
+        scope: StringEnum(["project", "global"] as const),
+        reason: Type.String({ minLength: 1, maxLength: 600 }), recommend: Type.Boolean(),
+      }, { additionalProperties: false }), { maxItems: 10000 }),
+    }, { additionalProperties: false }),
+    prepareArguments(args) {
+      if (!args || typeof args !== "object" || !("evaluationId" in args) || typeof args.evaluationId !== "string") {
+        throw new Error("evaluationId must be a string from the current evaluation");
+      }
+      if (Object.keys(args).some((key) => !["evaluationId", "groups"].includes(key))) throw new Error("Unexpected evaluation proposal field");
+      const evaluation = pendingEvaluation;
+      if (!evaluation || evaluation.id !== args.evaluationId) throw new Error("No matching pending evaluation; start /pi-mem evaluate again");
+      return { evaluationId: args.evaluationId,
+        groups: evaluationGroups("groups" in args ? args.groups : undefined, evaluation.state.limits, evaluation.snapshot) };
+    },
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
+      const evaluation = pendingEvaluation;
+      if (!evaluation || evaluation.id !== params.evaluationId) throw new Error("No matching pending evaluation; start /pi-mem evaluate again");
+      if (!ctx.hasUI) throw new Error("Candidate promotion requires interactive or RPC UI");
+      if (menu) throw new Error("A memory menu is already open; close it first");
+      const groups = evaluationGroups(params.groups, evaluation.state.limits, evaluation.snapshot);
+      const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      const check = () => {
+        controller.signal.throwIfAborted();
+        if (evaluation.generation !== generation || ctx.cwd !== evaluation.cwd || ctx.sessionManager.getSessionId() !== evaluation.session ||
+            current(ctx) !== evaluation.state || projectScope(ctx.cwd) !== evaluation.state.scope ||
+            (evaluation.anchor && !ctx.sessionManager.getBranch().some((entry) => entry.id === evaluation.anchor))) {
+          throw new Error("Session, project, or memory configuration changed; start a new evaluation");
+        }
+      };
+      const result = (status: string, data = {}) => ({ content: [{ type: "text" as const, text: JSON.stringify({ status, ...data }) }],
+        details: { status, ...data } });
+      try {
+        check();
+        pendingEvaluation = undefined;
+        menu = controller;
+        auditController = controller;
+        const approved = await reviewEvaluation(ctx, evaluation.snapshot, groups, evaluation.state.store,
+          evaluation.state.limits, controller.signal, check);
+        check();
+        if (approved === undefined) return result("cancelled", { message: "No candidates promoted; no similarity judgments saved" });
+        const promoted = evaluation.state.store.completeCandidateEvaluation(evaluation.snapshot,
+          { ...origin(ctx, _id), actor: "user" }, groups, approved);
+        recordSaved(promoted.filter((entry) => entry.created).map((entry) => entry.lessonId), ctx);
+        try { snapshot(ctx); } catch { /* Committed evaluation remains successful if status refresh fails. */ }
+        return result("evaluated", { promoted, candidates: evaluation.state.store.candidateCounts() });
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        if (menu === controller) menu = undefined;
+        if (auditController === controller) auditController = undefined;
+      }
+    },
+  });
+
   pi.registerCommand("pi-mem", {
     description: "Open the project memory menu, or use lesson subcommands",
     getArgumentCompletions(prefix) {
@@ -496,7 +638,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
           show(`Database: ${JSON.stringify(path)}\n${recall(ctx)}`, ctx);
           return;
         }
-        if (command === "audit") {
+        if (command === "evaluate") {
+          if (rest.trim() === "cancel") {
+            pendingEvaluation = undefined;
+            auditController?.abort(new Error("Candidate evaluation cancelled"));
+            show("Evaluation cancelled; no candidates promoted.", ctx);
+          } else {
+            if (rest.trim()) throw new Error("Usage: /pi-mem evaluate [cancel]");
+            sendEvaluation(ctx);
+          }
+        } else if (command === "audit") {
           if (rest.trim() === "cancel") {
             pendingAudit = undefined;
             auditController?.abort(new Error("Audit cancelled; no memories changed"));

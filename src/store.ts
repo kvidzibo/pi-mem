@@ -3,6 +3,7 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_LIMITS, memoryLimits, type MemoryLimits } from "./limits.ts";
+import { CandidateStore, type Candidate, type CandidateGroup, type CandidateSnapshot } from "./candidates.ts";
 
 export const MAX_TEXT = 1200;
 export const MAX_EVIDENCE = 600;
@@ -46,7 +47,7 @@ export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
 const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const BUSY_TIMEOUT_MS = 2000;
 export const DEFAULT_PRIORITY = 5;
 
@@ -103,6 +104,7 @@ export class MemoryStore {
   private db: DatabaseSync;
   private closed = false;
   private readonly limits: Readonly<MemoryLimits>;
+  private candidatesStore!: CandidateStore;
 
   constructor(path: string, limits: Readonly<MemoryLimits> = DEFAULT_LIMITS) {
     this.limits = memoryLimits({ ...limits });
@@ -116,7 +118,13 @@ export class MemoryStore {
     this.db = new DatabaseSync(path);
     try {
       this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA foreign_keys = ON;`);
-      this.transaction(() => this.initializeSchema());
+      this.candidatesStore = new CandidateStore(this.db, this.limits, (o) => this.checkOrigin(o), (fn) => this.transaction(fn),
+        (scope, input, origin, now) => this.insert(scope, input, origin, now));
+      this.transaction(() => {
+        const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
+        this.initializeSchema();
+        if (version !== SCHEMA_VERSION) this.candidatesStore.initialize();
+      });
       this.enableWal();
       this.db.exec("PRAGMA synchronous = FULL;");
     } catch (error) {
@@ -151,6 +159,9 @@ export class MemoryStore {
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
     const empty = application === 0 && version === 0 &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length === 0;
+    if (application === APPLICATION_ID && version === 7) {
+      return;
+    }
     if (application === APPLICATION_ID && version === 6) {
       this.initializeActivityHistory();
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -360,6 +371,20 @@ export class MemoryStore {
     this.db.prepare("UPDATE lessons SET priority = ? WHERE scope = ? AND id = ?").run(priority, scope, id);
     this.log(id, "set_priority", origin, { before: current.priority, after: priority });
     return this.get(scope, id);
+  }
+
+  stageCandidate(project: string, requestedScope: "project" | "global", input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
+    return this.candidatesStore.stage(project, requestedScope, input, origin, independenceKey);
+  }
+  ownCandidates(project: string, session: string): Candidate[] { return this.candidatesStore.own(project, session); }
+  candidateCounts(): { pending: number; sinceEvaluation: number } { return this.candidatesStore.counts(); }
+  candidateSnapshot(): CandidateSnapshot { return this.candidatesStore.snapshot(); }
+  markCandidateExposure(snapshot: CandidateSnapshot, independenceKey: string): CandidateSnapshot { return this.candidatesStore.expose(snapshot, independenceKey); }
+  qualifyCandidateGroup(snapshot: CandidateSnapshot, candidateIds: number[], scope: "project" | "global") {
+    return this.candidatesStore.qualify(snapshot, candidateIds, scope);
+  }
+  completeCandidateEvaluation(snapshot: CandidateSnapshot, evaluator: Origin, groups: CandidateGroup[], approvedGroupIndices: number[]) {
+    return this.candidatesStore.complete(snapshot, evaluator, groups, approvedGroupIndices);
   }
 
   close(): void {

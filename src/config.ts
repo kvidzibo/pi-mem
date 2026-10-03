@@ -15,8 +15,8 @@ export function memoryConfig(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("pi-mem.json must contain an object");
     }
-    if (Object.keys(parsed).some((key) => !["databasePath", "maxLessonWords", "maxEvidenceWords", "maxRecallLessons", "maxRecallBytes"].includes(key))) {
-      throw new Error("pi-mem.json only supports databasePath, maxLessonWords, maxEvidenceWords, maxRecallLessons and maxRecallBytes");
+    if (Object.keys(parsed).some((key) => !["databasePath", "maxLessonWords", "maxEvidenceWords", "maxRecallLessons", "maxRecallBytes", "projectMinOccurrences", "globalMinOccurrences", "globalMinProjects"].includes(key))) {
+      throw new Error("pi-mem.json only supports databasePath, word/recall limits, projectMinOccurrences, globalMinOccurrences and globalMinProjects");
     }
     config = parsed;
   } catch (error) {

@@ -1,11 +1,12 @@
-export interface MemoryLimits { maxLessonWords: number; maxEvidenceWords: number; maxRecallLessons: number; maxRecallBytes: number }
+export interface MemoryLimits { maxLessonWords: number; maxEvidenceWords: number; maxRecallLessons: number; maxRecallBytes: number; projectMinOccurrences: number; globalMinOccurrences: number; globalMinProjects: number }
 export const DEFAULT_LIMITS: Readonly<MemoryLimits> = Object.freeze({
   maxLessonWords: 20, maxEvidenceWords: 20, maxRecallLessons: 30, maxRecallBytes: 8192,
+  projectMinOccurrences: 2, globalMinOccurrences: 4, globalMinProjects: 3,
 });
 
 export function memoryLimits(config: Record<string, unknown> = {}): Readonly<MemoryLimits> {
   const limits = { ...DEFAULT_LIMITS };
-  for (const key of ["maxLessonWords", "maxEvidenceWords", "maxRecallLessons", "maxRecallBytes"] as const) {
+  for (const key of ["maxLessonWords", "maxEvidenceWords", "maxRecallLessons", "maxRecallBytes", "projectMinOccurrences", "globalMinOccurrences", "globalMinProjects"] as const) {
     const value = config[key] === undefined ? DEFAULT_LIMITS[key] : config[key];
     // Keep room for the heading and omission count even when no lessons fit.
     const minimum = key === "maxRecallBytes" ? 64 : 1;
