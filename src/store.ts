@@ -45,8 +45,8 @@ export type AuditChange = { id: number; reason: string; action: "archive" } | { 
 export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
-const APPLICATION_ID = 0x504d454d; // PMEM
-const SCHEMA_VERSION = 9;
+export const APPLICATION_ID = 0x504d454d; // PMEM
+export const SCHEMA_VERSION = 9;
 const BUSY_TIMEOUT_MS = 2000;
 const LESSONS_IMMUTABLE_TRIGGER = `CREATE TRIGGER lessons_immutable BEFORE UPDATE OF
   id, scope, text, text_key, evidence, basis, source_harness, source_session,
@@ -91,6 +91,8 @@ export const GLOBAL_SCOPE = "global";
 
 /** Harness-neutral SQLite storage. Every read/write is restricted to an exact scope. */
 export class MemoryStore {
+  /** True only for the connection that successfully created this schema. */
+  readonly initialized: boolean;
   private db: DatabaseSync;
   private closed = false;
   private readonly limits: Readonly<MemoryLimits>;
@@ -110,10 +112,11 @@ export class MemoryStore {
       this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA foreign_keys = ON;`);
       this.candidatesStore = new CandidateStore(this.db, this.limits, (o) => this.checkOrigin(o), (fn) => this.transaction(fn),
         (scope, input, origin, now) => this.insert(scope, input, origin, now));
-      this.transaction(() => {
+      this.initialized = this.transaction(() => {
         const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
-        this.initializeSchema();
+        const initialized = this.initializeSchema();
         if (version !== SCHEMA_VERSION) this.candidatesStore.initialize();
+        return initialized;
       });
       this.enableWal();
       this.db.exec("PRAGMA synchronous = FULL;");
@@ -144,7 +147,7 @@ export class MemoryStore {
     } finally { this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`); }
   }
 
-  private initializeSchema(): void {
+  private initializeSchema(): boolean {
     const application = Number(this.db.prepare("PRAGMA application_id").get()!.application_id);
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
     const empty = application === 0 && version === 0 &&
@@ -153,7 +156,7 @@ export class MemoryStore {
       if (application !== APPLICATION_ID || version !== SCHEMA_VERSION) {
         throw new Error(`Not a supported pi-mem database (application=${application}, schema=${version}); use a fresh database`);
       }
-      return;
+      return false;
     }
     this.db.exec(`
       CREATE TABLE lessons (
@@ -198,6 +201,7 @@ export class MemoryStore {
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
     this.initializeActivityHistory();
+    return true;
   }
 
   private initializeActivityHistory(): void {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { homedir, tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import { buildAudit, stagedAudit } from "./src/audit.ts";
 import { stagedEvaluation } from "./src/evaluation.ts";
 import { DEFAULT_LIMITS } from "./src/limits.ts";
 import { Backups } from "./src/backups.ts";
+import { schemaDatabasePath, selectDatabasePath } from "./src/database.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -81,7 +82,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "reason", "text"]);
-    inspection = new MemoryStore(process.env.PI_MEMORY_DB);
+    inspection = new MemoryStore(selectDatabasePath(process.env.PI_MEMORY_DB));
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
     assert.match((await event("before_agent_start", { systemPrompt: "Base prompt" })).systemPrompt,
@@ -291,116 +292,86 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
   }
 });
 
-test("real Pi loader: /pi-mem init safely cancels, refuses overrides, and selects a fresh database", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-mem-init-load-"));
+test("real Pi loader: automatic schema rollover preserves legacy files and reports creation once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-mem-rollover-load-"));
   const previous = { PI_MEMORY_DB: process.env.PI_MEMORY_DB, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
-  delete process.env.PI_MEMORY_DB;
+  const base = join(directory, "lessons.sqlite3");
+  const selected = schemaDatabasePath(base);
+  process.env.PI_MEMORY_DB = base;
   process.env.PI_CODING_AGENT_DIR = join(directory, "agent");
-  const configDir = process.env.PI_CODING_AGENT_DIR;
-  const configPath = join(configDir, "pi-mem.json");
-  const oldPath = join(directory, "old.sqlite3");
-  const legacy = new DatabaseSync(oldPath);
-  legacy.exec(`PRAGMA application_id = ${0x504d454d}; PRAGMA user_version = 8;
-    CREATE TABLE retained (text TEXT); INSERT INTO retained VALUES ('Old lesson retained');`);
-  legacy.close();
-  const oldBytes = readFileSync(oldPath);
-  const sidecarBytes = Buffer.from("legacy sidecar");
-  const backupBytes = Buffer.from("legacy backup");
-  const cwd = join(directory, "project");
-  mkdirSync(configDir, { recursive: true });
-  mkdirSync(cwd);
-  const originalConfig = { databasePath: oldPath, maxLessonWords: 17, maxEvidenceWords: 29, maxRecallLessons: 11 };
-  writeFileSync(configPath, JSON.stringify(originalConfig));
-  writeFileSync(oldPath, oldBytes);
-  writeFileSync(`${oldPath}.bak`, backupBytes);
+  const configPath = join(process.env.PI_CODING_AGENT_DIR, "pi-mem.json");
+  const config = { databasePath: base, maxLessonWords: 17, maxEvidenceWords: 29, maxRecallLessons: 11 };
+  mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+  const old = new DatabaseSync(base);
+  old.exec(`PRAGMA application_id = ${0x504d454d}; PRAGMA user_version = 8; CREATE TABLE retained (marker TEXT); INSERT INTO retained VALUES ('old');`);
+  old.close();
+  const legacyBytes = readFileSync(base);
+  const retainedFiles = [`${base}-wal`, `${base}-shm`, `${base}.backups.sqlite3`];
+  for (const file of retainedFiles) writeFileSync(file, "Legacy auxiliary file retained");
+  const olderSibling = `${base.slice(0, -".sqlite3".length)}-v8.sqlite3`;
+  writeFileSync(olderSibling, Buffer.from("known old versioned sibling"));
+  const siblingBytes = readFileSync(olderSibling);
+  writeFileSync(`${base}.bak`, Buffer.from("legacy backup"));
+  writeFileSync(configPath, JSON.stringify(config));
   const notices: string[] = [];
-  let selectLast = false;
-  let onSelect: (() => void | Promise<void>) | undefined;
   let extension: Awaited<ReturnType<typeof load>> | undefined;
   const ctx = {
-    cwd, hasUI: true, mode: "rpc",
-    sessionManager: { getSessionId: () => "init-session", getSessionFile: (): string | undefined => undefined,
+    cwd: directory, hasUI: true, mode: "rpc",
+    sessionManager: { getSessionId: () => "rollover-session", getSessionFile: (): string | undefined => undefined,
       getEntries: () => [], getLeafId: () => undefined, getBranch: () => [] },
     ui: { notify: (text: string) => notices.push(text), setStatus: () => {}, editor: async (_title: string, prefill: string) => prefill,
-      select: async (_title: string, choices: string[]) => { await onSelect?.(); return selectLast ? choices.at(-1) : choices[0]; } },
+      select: async (_title: string, choices: string[]) => choices[0] },
   };
   try {
     extension = await load();
+    for (const handler of extension.handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    assert.ok(existsSync(selected), "missing current schema gets its canonical versioned database");
+    assert.deepEqual(readFileSync(base), legacyBytes, "schema 8 legacy database is untouched");
+    for (const file of retainedFiles) assert.equal(readFileSync(file, "utf8"), "Legacy auxiliary file retained");
+    assert.equal(schemaDatabasePath(olderSibling), selected, "an older version suffix is replaced, not accumulated");
+    assert.deepEqual(readFileSync(olderSibling), siblingBytes, "older versioned sibling is untouched");
+    assert.deepEqual(readFileSync(`${base}.bak`), Buffer.from("legacy backup"));
+    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), config, "raw configured base and limits are not rewritten");
+    const prompt = await Promise.all((extension.handlers.get("before_agent_start") ?? []).map((handler: any) => handler({ systemPrompt: "Base prompt" }, ctx)));
+    assert.match(prompt.at(-1)?.systemPrompt ?? "", /Maximum 17 words per lesson and 29 words for evidence/);
+    const creationNotices = () => notices.filter((notice) => /schema 9/i.test(notice));
+    assert.equal(creationNotices().length, 1);
+    assert.ok(creationNotices()[0].includes(selected));
+    assert.match(creationNotices()[0], /untouched[\s\S]*not imported[\s\S]*migrate them manually[\s\S]*no automatic migration/i);
     const command = extension.commands.get("pi-mem");
     assert.ok(command);
-    for (const handler of extension.handlers.get("session_start") ?? []) await handler({ reason: "reload" }, ctx);
-    assert.match(notices.at(-1)!, /schema=8.*\/pi-mem init/, "recovery must bypass the cached initialization failure");
-    writeFileSync(`${oldPath}-wal`, sidecarBytes);
-    writeFileSync(`${oldPath}-shm`, sidecarBytes);
-    const filesBeforeCancel = readdirSync(configDir).sort();
-    await command.handler("init", ctx);
-    assert.deepEqual(readdirSync(configDir).sort(), filesBeforeCancel);
-    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), originalConfig, "Cancel is the default and writes nothing");
-    assert.deepEqual(readFileSync(oldPath), oldBytes);
-
-    process.env.PI_MEMORY_DB = join(directory, "override.sqlite3");
-    const noticeCount = notices.length;
-    await command.handler("init rejected.sqlite3", ctx);
-    assert.equal(notices.length, noticeCount + 1);
-    assert.match(notices.at(-1)!, /PI_MEMORY_DB is set/);
-    assert.equal(existsSync(join(cwd, "rejected.sqlite3")), false);
-
-    delete process.env.PI_MEMORY_DB;
-    selectLast = true;
-    const existing = join(cwd, "existing.sqlite3");
-    writeFileSync(existing, "");
-    await command.handler("init existing.sqlite3", ctx);
-    assert.match(notices.at(-1)!, /already exists/);
-    assert.equal(readFileSync(existing).length, 0);
-    const linked = join(cwd, "linked.sqlite3");
-    symlinkSync(oldPath, linked);
-    await command.handler("init linked.sqlite3", ctx);
-    assert.match(notices.at(-1)!, /already exists/);
-    const orphan = join(cwd, "orphan.sqlite3");
-    writeFileSync(`${orphan}-wal`, sidecarBytes);
-    await command.handler("init orphan.sqlite3", ctx);
-    assert.match(notices.at(-1)!, /already exists/);
-    assert.equal(existsSync(orphan), false);
-    assert.deepEqual(readFileSync(`${orphan}-wal`), sidecarBytes);
-
-    onSelect = () => { writeFileSync(configPath, JSON.stringify({ ...originalConfig, maxRecallLessons: 12 })); };
-    await command.handler("init stale.sqlite3", ctx);
-    assert.match(notices.at(-1)!, /configuration changed/);
-    assert.equal(existsSync(join(cwd, "stale.sqlite3")), false);
-    assert.equal(JSON.parse(readFileSync(configPath, "utf8")).maxRecallLessons, 12);
-    writeFileSync(configPath, JSON.stringify(originalConfig));
-    onSelect = async () => {
-      for (const handler of extension!.handlers.get("session_tree") ?? []) await handler({}, ctx);
-    };
-    await command.handler("init cancelled.sqlite3", ctx);
-    assert.equal(existsSync(join(cwd, "cancelled.sqlite3")), false);
-    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), originalConfig);
-    onSelect = undefined;
-
-    await command.handler("init fresh.sqlite3", ctx);
-    const selectedPath = join(cwd, "fresh.sqlite3");
-    assert.ok(existsSync(selectedPath));
-    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { ...originalConfig, databasePath: selectedPath });
-    assert.deepEqual(readFileSync(oldPath), oldBytes);
-    assert.deepEqual(readFileSync(`${oldPath}-wal`), sidecarBytes);
-    assert.deepEqual(readFileSync(`${oldPath}-shm`), sidecarBytes);
-    assert.deepEqual(readFileSync(`${oldPath}.bak`), backupBytes);
-
+    await command.handler("add Fresh versioned lesson.", ctx);
     await command.handler("reload", ctx);
-    assert.match(notices.at(-1)!, /PROJECT LESSONS$/);
-    await command.handler("add Fresh database lesson.", ctx);
-    assert.equal(JSON.parse(notices.at(-1)!).status, "saved", "the cached failure must be cleared and writes use the new store");
-    const observer = new MemoryStore(selectedPath);
-    try { assert.equal(observer.list(cwd).total, 1); } finally { observer.close(); }
-    ctx.hasUI = false;
-    Object.assign(extension.runtime, { sendMessage: () => {} });
-    await command.handler("init", ctx);
-    const generatedPath = JSON.parse(readFileSync(configPath, "utf8")).databasePath;
-    assert.match(generatedPath, new RegExp(`^${cwd}/fresh-[0-9a-f-]{36}\\.sqlite3$`));
-    assert.notEqual(generatedPath, selectedPath);
-    assert.ok(existsSync(generatedPath), "non-UI explicit command initializes and selects its generated sibling");
-    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { ...originalConfig, databasePath: generatedPath });
-    assert.ok(existsSync(selectedPath), "starting fresh never deletes the previously selected database");
+    assert.ok(notices.at(-1)!.includes("Fresh versioned lesson."), "existing versioned memories survive reload");
+    assert.equal(creationNotices().length, 1, "reload does not repeat the successful creation notice");
+
+    const healthyBase = join(directory, "healthy.sqlite3");
+    const healthy = new MemoryStore(healthyBase);
+    healthy.add(directory, { text: "Existing lesson retained.", evidence: "Verified legacy compatibility.", basis: "user_request" }, { harness: "test", session: null });
+    healthy.close();
+    const healthyBytes = readFileSync(healthyBase);
+    assert.equal(selectDatabasePath(healthyBase), healthyBase, "a valid current-schema unsuffixed DB remains compatible");
+    assert.equal(existsSync(schemaDatabasePath(healthyBase)), false, "compatibility does not create an empty versioned sibling");
+    assert.deepEqual(readFileSync(healthyBase), healthyBytes);
+    process.env.PI_MEMORY_DB = healthyBase;
+    await command.handler("reload", ctx);
+    assert.ok(notices.at(-1)!.includes("Existing lesson retained."), "the adapter keeps a working current-schema legacy store");
+    assert.equal(creationNotices().length, 1);
+
+    for (const contents of [Buffer.from("not sqlite"), legacyBytes, (() => {
+      const foreignPath = join(directory, "foreign.sqlite3");
+      const foreign = new DatabaseSync(foreignPath);
+      foreign.exec("PRAGMA application_id = 12345; PRAGMA user_version = 9;");
+      foreign.close();
+      return readFileSync(foreignPath);
+    })()]) {
+      const badBase = join(directory, `bad-${contents.length}.sqlite3`);
+      const badV9 = schemaDatabasePath(badBase);
+      writeFileSync(badV9, contents);
+      assert.throws(() => selectDatabasePath(badBase), /database|schema|application|not a database/i,
+        "corrupt or foreign current-version files fail selection instead of being bypassed");
+      assert.deepEqual(readFileSync(badV9), contents, "invalid current-version file is never reset");
+    }
   } finally {
     for (const handler of extension?.handlers.get("session_shutdown") ?? []) await handler({}, ctx);
     if (previous.PI_MEMORY_DB === undefined) delete process.env.PI_MEMORY_DB; else process.env.PI_MEMORY_DB = previous.PI_MEMORY_DB;
@@ -450,7 +421,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     ctx.hasUI = true;
     assert.equal(JSON.parse((await execute("Build assets before packaging.")).content[0].text).status, "candidate staged");
     assert.equal(statuses.at(-1)?.includes("🌱 1 (+1)"), true);
-    store = new MemoryStore(process.env.PI_MEMORY_DB);
+    store = new MemoryStore(selectDatabasePath(process.env.PI_MEMORY_DB));
     const snapshot = store.candidateSnapshot();
     assert.equal(snapshot.candidates.length, 1);
     assert.equal(store.list(ctx.cwd).total, 0, "model additions never create active lessons");
@@ -564,7 +535,7 @@ test("real Pi loader: lesson changes append deltas without rewriting earlier req
     for (const handler of extension.handlers.get(name) ?? []) result = await handler(value, ctx);
     return result;
   };
-  const db = new MemoryStore(process.env.PI_MEMORY_DB);
+  const db = new MemoryStore(selectDatabasePath(process.env.PI_MEMORY_DB));
   const source = { harness: "test", session: "external" };
   const add = (text: string, scope = directory) => db.add(scope, { text, evidence: "Verified.", basis: "user_request" }, source).lesson;
   const user = (text: string, timestamp: number) => ({ role: "user", content: text, timestamp });
@@ -744,7 +715,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       dispatchOptions.push(options);
     };
     await event("session_start");
-    observer = new MemoryStore(process.env.PI_MEMORY_DB);
+    observer = new MemoryStore(selectDatabasePath(process.env.PI_MEMORY_DB));
     for (let offset = 0; offset < 1002; offset += 500) {
       observer.addMany(project, Array.from({ length: Math.min(500, 1002 - offset) }, (_, i) => ({ text: `Seed ${offset + i}.`, evidence: "Verified.", basis: "user_request" as const })),
         { harness: "test", session: "seed-session" });
@@ -775,7 +746,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       { title: "Memory ·" },
     );
     await run();
-    const backups = new Backups(process.env.PI_MEMORY_DB);
+    const backups = new Backups(selectDatabasePath(process.env.PI_MEMORY_DB));
     assert.deepEqual(backups.settings(), { frequency: "daily", folder: backupDirectory });
     assert.equal(backups.stats().files, 1);
     // Select an empty folder so startup is due without changing the clock.

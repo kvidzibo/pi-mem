@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { GLOBAL_SCOPE, MemoryStore } from "../src/store.ts";
+import { selectDatabasePath } from "../src/database.ts";
 
 test("global lessons follow sessions across projects without exposing other project IDs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-mem-global-"));
@@ -46,7 +47,7 @@ test("global lessons follow sessions across projects without exposing other proj
     assert.notEqual(global.id, local.id, "duplicates are scope-local");
     assert.equal(global.scope, GLOBAL_SCOPE);
     assert.equal((await add(input.text, "global")).id, global.id);
-    store = new MemoryStore(process.env.PI_MEMORY_DB);
+    store = new MemoryStore(selectDatabasePath(process.env.PI_MEMORY_DB));
     const hidden = store.add(other, { text: "Other project secret.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
     await assert.rejects(execute({ action: "archive", id: hidden.id }), /not found/);
     await assert.rejects(execute({ ...input, scope: "/arbitrary" }), /does not accept scope/);

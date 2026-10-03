@@ -5,7 +5,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
-import { initializeDatabase, planInitialization } from "./init.ts";
+import { databaseCreatedNotice, selectDatabasePath } from "./database.ts";
 import { Backups, backupReport } from "./backups.ts";
 import { auditChanges, auditReview, buildAudit, stagedAudit, writeAudit } from "./audit.ts";
 import { menuChoice } from "./menu-ui.ts";
@@ -16,7 +16,7 @@ import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operati
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
-import { GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
+import { GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, SCHEMA_VERSION, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string; audit?: boolean };
@@ -24,7 +24,7 @@ const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
 const BACKUP_TYPE = "pi-mem-backup-report";
 const LINEAGE_TYPE = "pi-mem-discovery-lineage";
-const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "move", "archive", "archived", "evaluate", "audit", "init", "reload", "help"];
+const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "move", "archive", "archived", "evaluate", "audit", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
   "/pi-mem global add|list|archived|search … — manage global lessons; ID commands resolve project or global lessons",
@@ -36,7 +36,6 @@ const HELP = [
   "/pi-mem audit cancel — discard a pending audit or close its approval dialog",
   "/pi-mem evaluate — evaluate all pending candidates with the current model; review individual Yes / No promotions",
   "/pi-mem evaluate cancel — discard a pending evaluation or close its review",
-  "/pi-mem init [new-file-path] — create and select a fresh database; preserve the old database",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -76,8 +75,17 @@ export default function memoryExtension(pi: ExtensionAPI) {
     try {
       if (!state) {
         const scope = projectScope(ctx.cwd);
-        const { databasePath: path, ...limits } = memoryConfig(getAgentDir());
-        state = { store: new MemoryStore(path, limits), path, scope, cwd: ctx.cwd, limits };
+        const { databasePath: base, ...limits } = memoryConfig(getAgentDir());
+        const path = selectDatabasePath(base);
+        const store = new MemoryStore(path, limits);
+        state = { store, path, scope, cwd: ctx.cwd, limits };
+        if (store.initialized) {
+          let notice: string;
+          try { notice = databaseCreatedNotice(base, path); }
+          catch { notice = `Created memory database: ${JSON.stringify(path)}. Now using schema ${SCHEMA_VERSION}.\nPrevious database files could not be listed. Memories were not imported; manual migration may be needed.`; }
+          if (ctx.hasUI) ctx.ui.notify(notice, notice.includes("\nPrevious") ? "warning" : "info");
+          else console.error(notice);
+        }
       } else if (state.cwd !== ctx.cwd) {
         state.scope = projectScope(ctx.cwd);
         state.cwd = ctx.cwd;
@@ -160,8 +168,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function unavailable(error: unknown, ctx: ExtensionContext): string {
     const message = clipped(String(error instanceof Error ? error.message : error), 700);
-    const recovery = message.includes("Not a supported pi-mem database")
-      ? "Use /pi-mem init to create and select a fresh database." : "/pi-mem reload retries.";
+    const recovery = "/pi-mem reload retries after correcting the database path or file.";
     if (ctx.hasUI) {
       ctx.ui.setStatus("pi-mem", "\x1b[0m 🧠 unavailable \x1b[0m");
       if (message !== notified) ctx.ui.notify(`Memory unavailable: ${message}. ${recovery}`, "warning");
@@ -266,46 +273,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function recall(ctx: ExtensionContext): string {
     try { return snapshot(ctx).text; } catch (error) { return unavailable(error, ctx); }
-  }
-
-  async function initDatabase(destination: string, ctx: ExtensionContext) {
-    if (menu || pendingAudit || pendingEvaluation) throw new Error("Close or cancel the pending memory review before initializing a database");
-    const configDir = getAgentDir();
-    const plan = planInitialization(configDir, ctx.cwd, destination);
-    const controller = new AbortController();
-    const started = generation;
-    const session = ctx.sessionManager.getSessionId();
-    const cwd = ctx.cwd;
-    const check = () => {
-      controller.signal.throwIfAborted();
-      if (generation !== started || ctx.cwd !== cwd || ctx.sessionManager.getSessionId() !== session || getAgentDir() !== configDir) {
-        throw new Error("Session or memory configuration changed; run /pi-mem init again");
-      }
-    };
-    menu = controller;
-    try {
-      if (ctx.hasUI) {
-        const choice = await menuChoice(ctx, "Initialize fresh memory database?", [
-          `Previously configured: ${plan.previousPath}`, `New database: ${plan.path}`, `Configuration: ${plan.configPath}`, "",
-          "Creates an empty database and changes only databasePath in pi-mem.json. Existing settings are retained.",
-          "The old database, SQLite sidecars, backups, and lessons remain untouched. Nothing is imported.",
-          "This selects the new store for every session using this configuration; other sessions must run /pi-mem reload.",
-          "Earlier recalled text remains in conversation history. Cancel leaves all files unchanged.",
-        ].join("\n"), [{ value: "cancel", label: "Cancel" }, { value: "init", label: "Create and select" }], controller.signal);
-        check();
-        if (choice !== "init") { show("Database initialization cancelled; no files changed.", ctx); return; }
-      }
-      check();
-      initializeDatabase(plan);
-      // Selection has committed. Invalidate reviews and cached failure without misreporting later refresh errors.
-      menu = undefined;
-      reset();
-      try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
-      show({ status: "database initialized", database: plan.path, previousDatabase: plan.previousPath,
-        message: "Fresh database selected; the old database is untouched. Run /pi-mem reload in other sessions using this configuration." }, ctx);
-    } catch (error) {
-      if (!controller.signal.aborted) throw error;
-    } finally { if (menu === controller) menu = undefined; }
   }
 
   async function openMenu(ctx: ExtensionContext) {
@@ -661,7 +628,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
           }
         }
         if (command === "help") { show(HELP, ctx); return; }
-        if (command === "init") { await initDatabase(rest, ctx); return; }
         if (!command && ctx.hasUI) { await openMenu(ctx); return; }
         if (command === "reload") reset();
         const { store, path, scope: project } = current(ctx);
