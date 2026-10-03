@@ -12,7 +12,11 @@ in [`src/candidates.ts`](../src/candidates.ts). Those implementations are the
 source of truth; this document describes their public contract.
 
 `/pi-mem` commands and menus are **human interfaces, not agent tools**. Explicit
-human additions still create active lessons immediately.
+human additions still create active lessons immediately. `/pi-mem init
+[new-file-path]` is a human-only recovery command, not a fourth tool. It creates
+and selects a fresh schema 9 database without replacing the old files. See
+[database initialization](../README.md#initialize-database) for path, approval,
+configuration, and environment constraints.
 
 ## Common rules
 
