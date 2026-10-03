@@ -94,7 +94,7 @@ export async function reviewEvaluation(ctx: ExtensionContext, snapshot: Candidat
       `${snapshot.candidates.length} candidates · ${groups.length} proposed groups · ${approved.size} selected for promotion\nChoose a group to inspect wording, evidence and dates.\nFinish saves similarity judgments and only your Yes selections. Cancel discards the proposal.`, [
         { value: "cancel", label: "Cancel evaluation" },
         ...groups.map((group, index) => ({ value: String(index),
-          label: `${approved.has(index) ? "✓ Yes" : reviewed.has(index) ? "○ No" : group.recommend && store.qualifyCandidateGroup(snapshot, group.candidateIds, group.scope).eligible ? "Suggested" : "Pending"} · ${group.scope} · ${group.text}` })),
+          label: `Group ${index + 1} · ${approved.has(index) ? "✓ Yes" : reviewed.has(index) ? "○ No" : group.recommend && store.qualifyCandidateGroup(snapshot, group.candidateIds, group.scope).eligible ? "Suggested" : "Pending"} · ${group.scope} · ${group.text}` })),
         { value: "finish", label: `Finish evaluation (${approved.size} promotions)` },
       ], selected);
     if (!action || action === "cancel") return undefined;

@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { MemoryStore } from "../src/store.ts";
+import { reviewEvaluation } from "../src/evaluation.ts";
+import { DEFAULT_LIMITS } from "../src/limits.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const dir=()=>mkdtempSync(join(tmpdir(),"pi-candidates-"));
 const lesson={text:"Keep the verified project configuration.",evidence:"A repeated clean run confirmed the configuration.",basis:"validated_learning" as const};
@@ -103,6 +106,36 @@ test("exposure survives promotion and recreated exact identities without changin
   assert.deepEqual(repeated, [{ groupIndex: 0, lessonId, created: false }]);
   assert.equal(store.get("/p/a", lessonId).priority, 5, "duplicate promotion cannot rerank an existing lesson");
   assert.equal(store.history("/p/a", lessonId).events.length, 1);
+});
+
+test("RPC review uniquely selects and revises identical project suggestions after both are approved", async t => {
+  const root = dir(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new MemoryStore(join(root, "db")); t.after(() => store.close());
+  for (const project of ["/p/a", "/p/b"]) for (const session of ["first", "second"]) {
+    const owner = `${project}-${session}`;
+    store.stageCandidate(project, "project", lesson, origin(owner), owner);
+  }
+  const snapshot = store.candidateSnapshot();
+  const groups = snapshot.candidates.map(candidate => ({ ...group, candidateIds: [candidate.id] }));
+  const rootSelections = [1, 2, 2, "finish"];
+  const decisions = ["Yes — promote", "Yes — promote", "No — keep pending"];
+  let opened = 0;
+  const ctx = { mode: "rpc", ui: { select: async (title: string, labels: string[]) => {
+    assert.equal(new Set(labels).size, labels.length, "RPC labels must always identify exactly one group");
+    if (title.startsWith("Review candidate evaluation")) {
+      const selected = rootSelections.shift();
+      assert.notEqual(selected, undefined);
+      return selected === "finish" ? labels.find(label => label.startsWith("Finish evaluation"))!
+        : labels.find(label => label.startsWith(`Group ${selected} ·`))!;
+    }
+    assert.match(title, /^Candidate group/);
+    assert.ok(title.includes(opened++ === 0 ? "/p/a" : "/p/b"), "reopening group two must show the second project's evidence");
+    return decisions.shift()!;
+  } } } as unknown as ExtensionContext;
+  const approved = await reviewEvaluation(ctx, snapshot, groups, store, DEFAULT_LIMITS, new AbortController().signal, () => {});
+  assert.deepEqual(approved, [0], "No on the reopened second group removes only its own approval");
+  assert.equal(rootSelections.length, 0); assert.equal(decisions.length, 0);
+  assert.equal(store.list("/p/a").total, 0); assert.equal(store.list("/p/b").total, 0, "review selections alone do not write lessons");
 });
 
 test("schema 7 upgrades atomically to candidate schema 8",t=>{
