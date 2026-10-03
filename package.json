@@ -1,6 +1,6 @@
 {
   "name": "@kvidzibo/pi-mem",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "SQLite-backed project memory for Pi",
   "license": "MIT",
   "publishConfig": {
@@ -23,6 +23,7 @@
     "index.ts",
     "src",
     "README.md",
+    "docs",
     "LICENSE"
   ],
   "engines": {

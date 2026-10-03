@@ -32,24 +32,30 @@ test("global lessons follow sessions across projects without exposing other proj
   };
   const tool = extension.tools.get("memory").definition;
   const execute = async (params: object) => (await tool.execute("call", tool.prepareArguments(params), undefined, undefined, ctx)).details;
-  const input = { action: "add", text: "Use CLI dry runs before writes.", evidence: "Verified CLI behavior.", basis: "validated_learning", priority: 3 };
+  const input = { action: "add", text: "Use CLI dry runs before writes.", evidence: "Verified CLI behavior.", basis: "validated_learning" };
   let store: MemoryStore | undefined;
+  let report: any;
+  loaded.runtime.sendMessage = (message: { content: string }) => { report = JSON.parse(message.content); };
+  const add = async (text: string, scope = "project", priority = 3) => {
+    await extension.commands.get("pi-mem").handler(`${scope === "global" ? "global " : ""}add --priority ${priority} ${text}`, ctx);
+    return report;
+  };
   try {
-    const local = await execute(input);
-    const global = await execute({ ...input, scope: "global" });
+    const local = await add(input.text);
+    const global = await add(input.text, "global");
     assert.notEqual(global.id, local.id, "duplicates are scope-local");
     assert.equal(global.scope, GLOBAL_SCOPE);
-    assert.equal((await execute({ ...input, scope: "global" })).id, global.id);
+    assert.equal((await add(input.text, "global")).id, global.id);
     store = new MemoryStore(process.env.PI_MEMORY_DB);
     const hidden = store.add(other, { text: "Other project secret.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
     await assert.rejects(execute({ action: "archive", id: hidden.id }), /not found/);
-    await assert.rejects(execute({ ...input, scope: "/arbitrary" }), /scope must/);
-    await assert.rejects(execute({ action: "archive", id: global.id, scope: "project" }), /only supported for add/);
+    await assert.rejects(execute({ ...input, scope: "/arbitrary" }), /does not accept scope/);
+    await assert.rejects(execute({ action: "archive", id: global.id, scope: "project" }), /does not accept scope/);
     let recall = (await event("context", { messages: [] })).messages[0].content;
     assert.match(recall, /^GLOBAL LESSONS/);
     assert.match(recall, new RegExp(`#${global.id}\\n\\nPROJECT LESSONS`));
     assert.match(recall, new RegExp(`#${local.id}$`));
-    const extra = await execute({ ...input, scope: "global", text: "A lower priority global lesson.", priority: 9 });
+    const extra = await add("A lower priority global lesson.", "global", 9);
     const updated = (await event("context", { messages: [] })).messages;
     assert.equal(updated[0].content, recall, "the original global and project snapshot stays cached");
     assert.match(updated.at(-1).content, /1 lessons omitted/);

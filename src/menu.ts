@@ -38,7 +38,7 @@ const PAGE_SIZE = 1000;
 const errorText = (error: unknown) => visible(clipped(error instanceof Error ? error.message : String(error), 1000));
 
 /** Browsing stays private; only an explicitly confirmed audit can request an agent turn. */
-export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | { audit: { allProjects: boolean } } | undefined> {
+export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | "evaluate" | { audit: { allProjects: boolean } } | undefined> {
   const { signal } = access;
   let browsingScope: string | undefined;
   const viewState = (): MenuState => {
@@ -503,17 +503,25 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
       const recalled = memoryContext(page, state.limits.maxRecallBytes);
       const globalPage = state.store.recall(GLOBAL_SCOPE);
       const globalRecalled = memoryContext(globalPage, globalRecallBytes(state.limits.maxRecallBytes), "GLOBAL LESSONS");
-      summary = `${page.total} active · ${recalled.loaded} loaded into context (project)\nGlobal: ${globalPage.total} active · ${globalRecalled.loaded} loaded into context`;
+      const candidates = state.store.candidateCounts();
+      summary = `${page.total} active · ${recalled.loaded} loaded into context (project)\nGlobal: ${globalPage.total} active · ${globalRecalled.loaded} loaded into context\n🌱 ${candidates.pending} pending candidates · ${candidates.sinceEvaluation} new since last completed evaluation (all projects)`;
       if (!page.total) summary += "\nNo project lessons yet. Add a lesson.";
     } catch (error) { state = undefined; summary = `Memory unavailable: ${errorText(error)}`; }
     const action = await choose(`Memory · ${basename(state?.scope ?? ctx.cwd)}`, summary, [
       ...(state ? [item("browse", "Browse / search lessons"), item("add", "Add lesson"), item("archived", "Archived lessons"),
-        item("global", "Global lessons"), item("projects", "All projects"), item("audit", "Audit…"), item("move", "Move memory"), item("backups", "Backups…")] : []),
+        item("global", "Global lessons"), item("projects", "All projects"), item("evaluate", "Evaluate candidates…"), item("audit", "Audit…"), item("move", "Move memory"), item("backups", "Backups…")] : []),
       item("status", "Status & limits"), item("reload", "Reload memory"), item("help", "Help"),
     ], selected);
     if (!action) return;
     selected = action;
     if (action === "reload") return "reload";
+    if (action === "evaluate") {
+      const candidates = access.current().store.candidateCounts();
+      const confirmed = await choose("Evaluate candidates", `${candidates.pending} pending candidates across all projects.\nSend every candidate, evidence, submission date, and previous grouping to the current model.\nThe evaluation is retained in this conversation. Nothing is promoted without individual approval.`,
+        [CANCEL, item("send", "Send to current model")]);
+      if (confirmed === "send") return "evaluate";
+      continue;
+    }
     try {
       if (action === "status") await status();
       else if (action === "help") await choose("Memory help", access.help + "\n\nBrowsing stays in the UI; only a confirmed audit sends lessons to the agent.\nReplace and archive retain records. There is no restore or delete.", [BACK]);

@@ -131,7 +131,7 @@ for (const version of [1, 2, 3, 4, 5]) test(`schema ${version} upgrades discard 
   const migrated = new DatabaseSync(path);
   try {
     assert.deepEqual(migrated.prepare("SELECT * FROM lessons ORDER BY id").all().map((row) => ({ ...row })), expected);
-    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 7);
+    assert.equal(migrated.prepare("PRAGMA user_version").get()!.user_version, 8);
     if (version <= 2) {
       const history = db.history("/project", firstId).events;
       assert.deepEqual(history.map((event) => event.action), ["archive", "create"]);
