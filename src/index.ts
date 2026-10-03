@@ -1,16 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { estimateTokens, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
-import { buildAudit, writeAudit } from "./audit.ts";
+import { auditChanges, auditReview, buildAudit, stagedAudit, writeAudit } from "./audit.ts";
+import { menuChoice } from "./menu-ui.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
 import { ACTIONS, parseLessonId, runMemory, type MemoryRequest } from "./operations.ts";
 import { boundedPage, clipped, formatTokens, globalRecallBytes, memoryContext, RESULT_BYTES, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { CONTEXT_TYPE, RecallContext, type RecallSnapshot } from "./recall.ts";
-import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type Lesson, type Origin } from "./store.ts";
+import { checkedPriority, DEFAULT_PRIORITY, GLOBAL_SCOPE, MAX_EVIDENCE, MAX_TEXT, MemoryStore, type AuditSnapshot, type Lesson, type Origin } from "./store.ts";
 
 type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
@@ -25,7 +27,8 @@ const HELP = [
   "/pi-mem priority <id> <0–10> — change priority without replacing lesson content",
   "/pi-mem history <id> [offset] — inspect retained activity and attribution",
   "/pi-mem move <id> <destination-path|--global|--project> — move lesson and linked history; --project means current project; preserve IDs",
-  "/pi-mem audit [--all-projects] [--file <path>] — audit all active project + global lessons; recommendations only; file must not exist",
+  "/pi-mem audit [--all-projects] [--file <path>] — agent proposal with Apply all / Cancel; file export is recommendations only",
+  "/pi-mem audit cancel — discard a pending audit or close its approval dialog",
   "/pi-mem reload — reconnect and reread database configuration",
 ].join("\n");
 
@@ -35,10 +38,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let notified: string | undefined;
   let menu: AbortController | undefined;
   let generation = 0;
+  let auditController: AbortController | undefined;
+  let auditTurnBlocked = false;
+  let pendingAudit: { id: string; snapshot: AuditSnapshot; state: MenuState; generation: number; session: string; cwd: string; anchor: string | null } | undefined;
   const recallContext = new RecallContext();
 
   function reset() {
     generation++;
+    pendingAudit = undefined;
     menu?.abort(new Error("Session or memory configuration changed; menu closed"));
     state?.store.close();
     state = undefined;
@@ -134,10 +141,17 @@ export default function memoryExtension(pi: ExtensionAPI) {
     else pi.sendMessage({ customType: "pi-mem-report", content: text, display: true });
   }
 
-  function sendAudit(content: string) {
-    // Deliberate model-visible audit, unlike bounded chat-only command reports.
-    // No slash-command expansion; the menu has closed before dispatch.
-    pi.sendMessage({ customType: "pi-mem-audit", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+  function sendAudit(allProjects: boolean, ctx: ExtensionContext) {
+    if (menu) throw new Error("Close the memory review before starting another audit");
+    const value = current(ctx);
+    const id = randomUUID();
+    const audit = { id, snapshot: value.store.auditSnapshot(value.scope, allProjects), state: value,
+      generation, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, anchor: ctx.sessionManager.getLeafId() };
+    pendingAudit = audit;
+    auditTurnBlocked = true;
+    // Deliberate model-visible audit; the menu has closed before dispatch. Never parse a Markdown reply.
+    pi.sendMessage({ customType: "pi-mem-audit", content: stagedAudit(audit.snapshot, id), display: true },
+      { triggerTurn: true, deliverAs: "followUp" });
   }
 
   function recordSaved(ids: number[], ctx: ExtensionContext) {
@@ -226,7 +240,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       } finally {
         if (menu === controller) menu = undefined;
       }
-      if (action && typeof action === "object") { sendAudit(action.audit); return; }
+      if (action && typeof action === "object") { sendAudit(action.audit.allProjects, ctx); return; }
       if (action !== "reload") return;
       reset();
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
@@ -246,6 +260,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    // Only a fresh prompt releases the run-level barrier. Reload, navigation, compaction and automatic retries do not.
+    if (!pendingAudit && !auditController && !menu) auditTurnBlocked = false;
     try {
       const { limits } = current(ctx);
       return { systemPrompt: event.systemPrompt + "\n\nFor memory add/supersede: save one actionable point, preferably one sentence. " +
@@ -258,8 +274,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_compact", () => { recallContext.reset(); });
-  pi.on("session_tree", () => { recallContext.reset(); });
+  const invalidateAudit = () => {
+    pendingAudit = undefined;
+    menu?.abort(new Error("Session branch changed; memory review cancelled"));
+    recallContext.reset();
+  };
+  pi.on("session_compact", invalidateAudit);
+  pi.on("session_tree", invalidateAudit);
 
   pi.on("context", (event, ctx) => {
     let recalled: RecallSnapshot;
@@ -313,6 +334,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
+      if (pendingAudit || menu || auditTurnBlocked) throw new Error("Memory review pending; submit the audit through memory_audit and await user approval");
       const { store, scope } = current(ctx);
       if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
@@ -321,6 +343,84 @@ export default function memoryExtension(pi: ExtensionAPI) {
       // Saving succeeded even if a later status/recall refresh fails; report the commit accurately.
       try { snapshot(ctx); } catch (error) { unavailable(error, ctx); }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_audit",
+    label: "Memory audit proposal",
+    description: "Submit the complete structured proposal for a user-requested memory audit. Requires the auditId from the current audit export. " +
+      "Only audited active IDs are allowed; never target priority 0. Actions: archive, set_priority (priority 1–10), move_global. " +
+      "One action per ID, with a short reason. Empty changes means no warranted changes. " +
+      "Nothing changes without the user's Apply all choice in the extension UI; Cancel changes nothing. " +
+      "Approval applies the whole batch atomically across audited scopes, rejecting stale lessons or duplicate destinations. " +
+      "Do not apply audit changes through memory or shell commands.",
+    parameters: Type.Object({
+      auditId: Type.String({ minLength: 1, maxLength: 80 }),
+      changes: Type.Array(Type.Union([
+        Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("archive"),
+          reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
+        Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("set_priority"),
+          priority: Type.Integer({ minimum: 1, maximum: 10 }), reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
+        Type.Object({ id: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), action: Type.Literal("move_global"),
+          reason: Type.String({ minLength: 1, maxLength: 600 }) }, { additionalProperties: false }),
+      ]), { maxItems: 10000 }),
+    }, { additionalProperties: false }),
+    prepareArguments(args) {
+      if (!args || typeof args !== "object" || !("auditId" in args) || typeof args.auditId !== "string") {
+        throw new Error("auditId must be a string from the current audit");
+      }
+      if (Object.keys(args).some((key) => !["auditId", "changes"].includes(key))) throw new Error("Unexpected audit proposal field");
+      return { auditId: args.auditId, changes: auditChanges("changes" in args ? args.changes : undefined) };
+    },
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
+      const audit = pendingAudit;
+      if (!audit || audit.id !== params.auditId) throw new Error("No matching pending audit; start /pi-mem audit again");
+      if (!ctx.hasUI) throw new Error("Audit approval requires interactive or RPC UI; no memories changed");
+      if (menu) throw new Error("A memory menu is already open; close it first");
+      const changes = auditChanges(params.changes, audit.snapshot);
+      const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      const check = () => {
+        controller.signal.throwIfAborted();
+        if (audit.generation !== generation || ctx.cwd !== audit.cwd || ctx.sessionManager.getSessionId() !== audit.session ||
+            current(ctx) !== audit.state || projectScope(ctx.cwd) !== audit.snapshot.project ||
+            (audit.anchor && !ctx.sessionManager.getBranch().some((entry) => entry.id === audit.anchor))) {
+          throw new Error("Session, project, or memory configuration changed; start a new audit");
+        }
+      };
+      const result = (status: string, data = {}) => ({ content: [{ type: "text" as const, text: JSON.stringify({ status, ...data }) }],
+        details: { status, ...data } });
+      try {
+        check();
+        // A proposal is one-shot. Session changes abort the review; a late approval cannot resurrect it.
+        pendingAudit = undefined;
+        if (!changes.length) return result("no changes");
+        menu = controller;
+        auditController = controller;
+        const choice = await menuChoice(ctx, "Review memory audit", auditReview(audit.snapshot, changes),
+          [{ value: "cancel", label: "Cancel" }, { value: "apply", label: "Apply all" }], controller.signal);
+        check();
+        if (choice !== "apply") return result("cancelled", { message: "No memories changed" });
+        // Attribution retains the proposing model, while actor=user records the explicit UI approval.
+        const applied = audit.state.store.applyAudit(audit.snapshot, changes, { ...origin(ctx, _id), actor: "user" });
+        for (const entry of applied) {
+          if (entry.action === "archive" && (entry.from === audit.snapshot.project || entry.from === GLOBAL_SCOPE)) {
+            try { recordArchived(entry.lesson.id, ctx); } catch { /* Committed writes remain successful if UI reporting fails. */ }
+          }
+        }
+        try { snapshot(ctx); } catch { /* Recall will refresh on the next request; never misreport a committed batch. */ }
+        return result("applied", { count: applied.length, changes: applied.map((entry) => ({ id: entry.lesson.id,
+          action: entry.action, from: entry.from, scope: entry.lesson.scope, priority: entry.lesson.priority,
+          ...(entry.moved === undefined ? {} : { records: entry.moved }) })) });
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        if (menu === controller) menu = undefined;
+        if (auditController === controller) auditController = undefined;
+      }
     },
   });
 
@@ -353,15 +453,20 @@ export default function memoryExtension(pi: ExtensionAPI) {
           return;
         }
         if (command === "audit") {
+          if (rest.trim() === "cancel") {
+            pendingAudit = undefined;
+            auditController?.abort(new Error("Audit cancelled; no memories changed"));
+            show("Audit cancelled; no memories changed.", ctx);
+            return;
+          }
           let [flag, tail] = firstWord(rest);
           const allProjects = flag === "--all-projects";
           if (allProjects) [flag, tail] = firstWord(tail);
           if ((flag && flag !== "--file") || (flag === "--file" && !tail)) {
             throw new Error("Usage: /pi-mem audit [--all-projects] [--file <new-file-path>]");
           }
-          const content = buildAudit(store, project, allProjects);
-          if (flag === "--file") show(`Audit exported to ${JSON.stringify(writeAudit(ctx.cwd, tail, content))}. No memories changed.`, ctx);
-          else sendAudit(content);
+          if (flag === "--file") show(`Audit exported to ${JSON.stringify(writeAudit(ctx.cwd, tail, buildAudit(store, project, allProjects)))}. No memories changed.`, ctx);
+          else sendAudit(allProjects, ctx);
         } else if (command === "list" || command === "archived") {
           const offset = rest ? Number(rest) : 0;
           show(boundedPage(store.list(scope, { state: command === "archived" ? "archived" : "active", offset }), offset), ctx);

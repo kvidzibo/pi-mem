@@ -5,7 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import type { MemoryLimits } from "./limits.ts";
 import { destinationInput, lessonEditor, menuChoice, words } from "./menu-ui.ts";
-import { buildAudit, writeAudit } from "./audit.ts";
+import { buildAudit, stagedAudit, writeAudit } from "./audit.ts";
 import { clipped, formatTokens, globalRecallBytes, memoryContext, visible } from "./presentation.ts";
 import { moveDestination, projectScope } from "./project.ts";
 import { checkNew, DEFAULT_PRIORITY, GLOBAL_SCOPE, type Activity, type Lesson, type MemoryStore, type Origin } from "./store.ts";
@@ -37,7 +37,7 @@ const PAGE_SIZE = 1000;
 const errorText = (error: unknown) => visible(clipped(error instanceof Error ? error.message : String(error), 1000));
 
 /** Browsing stays private; only an explicitly confirmed audit can request an agent turn. */
-export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | { audit: string } | undefined> {
+export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Promise<"reload" | { audit: { allProjects: boolean } } | undefined> {
   const { signal } = access;
   let browsingScope: string | undefined;
   const viewState = (): MenuState => {
@@ -399,10 +399,12 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     ctx.ui.notify(`Moved ${moved} lessons to ${JSON.stringify(to)}.`, "info");
   }
 
-  async function audit(): Promise<{ audit: string } | undefined> {
+  async function audit(): Promise<{ audit: { allProjects: boolean } } | undefined> {
     const { store: estimateStore, scope: estimateProject } = access.current();
-    const tokens = (allProjects: boolean) => formatTokens(Math.ceil(buildAudit(estimateStore, estimateProject, allProjects).length / 4));
-    const scope = await choose("Audit memories — scope", "All active lessons, including those omitted from recall. Archived records stay excluded.\nToken estimates include the full audit text and metadata (characters/4).",
+    // A UUID-sized placeholder keeps the estimate aligned with the staged agent payload.
+    const tokens = (allProjects: boolean) => formatTokens(Math.ceil(stagedAudit(
+      estimateStore.auditSnapshot(estimateProject, allProjects), "00000000-0000-0000-0000-000000000000").length / 4));
+    const scope = await choose("Audit memories — scope", "All active lessons, including those omitted from recall. Archived records stay excluded.\nToken estimates include the full audit text and metadata (characters/4); file exports can be smaller.",
       [item("current", `Current project + global (~${tokens(false)} tokens)`),
         item("all", `All projects + global (~${tokens(true)} tokens)`), CANCEL]);
     if (!scope || scope === "cancel") return;
@@ -424,9 +426,8 @@ export async function memoryMenu(ctx: ExtensionContext, access: MenuAccess): Pro
     ].join("\n\n"), [CANCEL, item("confirm", output === "agent" ? "Send to agent" : "Export")]);
     if (confirmed !== "confirm") return;
     const { store, scope: project } = access.current();
-    const content = buildAudit(store, project, scope === "all");
-    if (output === "agent") return { audit: content };
-    const written = writeAudit(ctx.cwd, path!, content);
+    if (output === "agent") return { audit: { allProjects: scope === "all" } };
+    const written = writeAudit(ctx.cwd, path!, buildAudit(store, project, scope === "all"));
     ctx.ui.notify(`Audit exported to ${JSON.stringify(written)}. No memories changed.`, "info");
   }
 

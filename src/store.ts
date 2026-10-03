@@ -39,6 +39,9 @@ export interface Lesson {
   supersedes_id: number | null;
 }
 export interface NewLesson { text: string; evidence: string; basis: Basis; priority?: number }
+export interface AuditLesson extends Lesson { activity_id: number }
+export interface AuditSnapshot { project: string; allProjects: boolean; lessons: AuditLesson[] }
+export type AuditChange = { id: number; reason: string; action: "archive" } | { id: number; reason: string; action: "set_priority"; priority: number } | { id: number; reason: string; action: "move_global" };
 export interface RecallPage { lessons: Iterable<Lesson>; total: number }
 export interface Page extends RecallPage { lessons: Lesson[]; nextOffset: number | null }
 
@@ -342,19 +345,21 @@ export class MemoryStore {
   setPriority(scope: string, id: number, priority: number, origin: Origin): Lesson {
     checkedPriority(priority, origin.actor === "model" ? 1 : 0);
     this.checkOrigin(origin);
-    return this.transaction(() => {
-      const current = this.get(scope, id);
-      if (current.archived) throw new Error("Archived lesson priority is read-only");
-      if (origin.actor === "model" && current.priority === 0) throw new Error("Priority 0 is user-reserved; models cannot reprioritize it");
-      if (current.priority === priority) return current;
-      this.db.prepare(`INSERT INTO priority_changes
-        (id, lesson_id, old_priority, new_priority, changed_at, source_harness, source_session)
-        VALUES ((SELECT coalesce(max(id), 0) + 1 FROM priority_changes), ?, ?, ?, ?, ?, ?)`)
-        .run(id, current.priority, priority, Date.now(), origin.harness, origin.session);
-      this.db.prepare("UPDATE lessons SET priority = ? WHERE scope = ? AND id = ?").run(priority, scope, id);
-      this.log(id, "set_priority", origin, { before: current.priority, after: priority });
-      return this.get(scope, id);
-    });
+    return this.transaction(() => this.setPriorityInTransaction(scope, id, priority, origin));
+  }
+
+  private setPriorityInTransaction(scope: string, id: number, priority: number, origin: Origin): Lesson {
+    const current = this.get(scope, id);
+    if (current.archived) throw new Error("Archived lesson priority is read-only");
+    if (origin.actor === "model" && current.priority === 0) throw new Error("Priority 0 is user-reserved; models cannot reprioritize it");
+    if (current.priority === priority) return current;
+    this.db.prepare(`INSERT INTO priority_changes
+      (id, lesson_id, old_priority, new_priority, changed_at, source_harness, source_session)
+      VALUES ((SELECT coalesce(max(id), 0) + 1 FROM priority_changes), ?, ?, ?, ?, ?, ?)`)
+      .run(id, current.priority, priority, Date.now(), origin.harness, origin.session);
+    this.db.prepare("UPDATE lessons SET priority = ? WHERE scope = ? AND id = ?").run(priority, scope, id);
+    this.log(id, "set_priority", origin, { before: current.priority, after: priority });
+    return this.get(scope, id);
   }
 
   close(): void {
@@ -421,31 +426,33 @@ export class MemoryStore {
     this.checkScope(to);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
     if (from === to) throw new Error("Source and destination scopes must differ");
-    return this.transaction(() => {
-      const selected = this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? AND id = ?").get(from, id);
-      if (!selected) throw new Error("Lesson not found in this project");
-      // UNION deduplicates the bidirectional walk; no chain member can be left behind.
-      const chain = `WITH RECURSIVE chain(id, supersedes_id) AS (
-        SELECT id, supersedes_id FROM lessons WHERE scope = ? AND id = ?
-        UNION
-        SELECT l.id, l.supersedes_id FROM lessons l JOIN chain c
-          ON l.id = c.supersedes_id OR l.supersedes_id = c.id
-        WHERE l.scope = ?
-      )`;
-      const duplicate = this.db.prepare(`${chain}
-        SELECT 1 FROM lessons l JOIN chain c ON c.id = l.id JOIN lessons d
-          ON d.scope = ? AND d.archived = 0 AND l.archived = 0 AND d.text_key = l.text_key
-        LIMIT 1`).get(from, id, from, to);
-      if (duplicate) throw new Error("Duplicate active text in destination project");
-      const members = this.db.prepare(`${chain} SELECT id FROM chain`).all(from, id, from);
-      for (const row of members) this.log(Number(row.id), "move", origin, { before: from, after: to });
-      this.db.exec("DROP TRIGGER lessons_immutable");
-      const result = this.db.prepare(`${chain}
-        UPDATE lessons SET scope = ? WHERE scope = ? AND id IN (SELECT id FROM chain)`)
-        .run(from, id, from, to, from);
-      this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
-      return Number(result.changes);
-    });
+    return this.transaction(() => this.moveLessonInTransaction(from, id, to, origin));
+  }
+
+  private moveLessonInTransaction(from: string, id: number, to: string, origin: Origin): number {
+    const selected = this.db.prepare("SELECT 1 FROM lessons WHERE scope = ? AND id = ?").get(from, id);
+    if (!selected) throw new Error("Lesson not found in this project");
+    // UNION deduplicates the bidirectional walk; no chain member can be left behind.
+    const chain = `WITH RECURSIVE chain(id, supersedes_id) AS (
+      SELECT id, supersedes_id FROM lessons WHERE scope = ? AND id = ?
+      UNION
+      SELECT l.id, l.supersedes_id FROM lessons l JOIN chain c
+        ON l.id = c.supersedes_id OR l.supersedes_id = c.id
+      WHERE l.scope = ?
+    )`;
+    const duplicate = this.db.prepare(`${chain}
+      SELECT 1 FROM lessons l JOIN chain c ON c.id = l.id JOIN lessons d
+        ON d.scope = ? AND d.archived = 0 AND l.archived = 0 AND d.text_key = l.text_key
+      LIMIT 1`).get(from, id, from, to);
+    if (duplicate) throw new Error("Duplicate active text in destination project");
+    const members = this.db.prepare(`${chain} SELECT id FROM chain`).all(from, id, from);
+    for (const row of members) this.log(Number(row.id), "move", origin, { before: from, after: to });
+    this.db.exec("DROP TRIGGER lessons_immutable");
+    const result = this.db.prepare(`${chain}
+      UPDATE lessons SET scope = ? WHERE scope = ? AND id IN (SELECT id FROM chain)`)
+      .run(from, id, from, to, from);
+    this.db.exec(LESSONS_IMMUTABLE_TRIGGER);
+    return Number(result.changes);
   }
 
   /** Resolve only IDs visible to this session, never another project's lessons. */
@@ -492,6 +499,63 @@ export class MemoryStore {
     return this.db.prepare(`SELECT * FROM lessons WHERE archived = 0 ${where}
       ORDER BY scope, priority, created_at DESC, id`)
       .all(...(allProjects ? [] : [project, GLOBAL_SCOPE])).map(lesson);
+  }
+
+  auditSnapshot(project: string, allProjects = false): AuditSnapshot {
+    this.checkScope(project);
+    const where = allProjects ? "" : "AND l.scope IN (?, ?)";
+    const rows = this.db.prepare(`SELECT l.*, (SELECT max(a.id) FROM activity a WHERE a.lesson_id = l.id) AS activity_id
+      FROM lessons l WHERE l.archived = 0 ${where} ORDER BY l.scope, l.priority, l.created_at DESC, l.id`)
+      .all(...(allProjects ? [] : [project, GLOBAL_SCOPE]));
+    return { project, allProjects, lessons: rows.map((row) => ({ ...lesson(row), activity_id: Number(row.activity_id) })) };
+  }
+
+  applyAudit(snapshot: AuditSnapshot, changes: AuditChange[], origin: Origin): Array<{ action: AuditChange["action"]; from: string; lesson: Lesson; moved?: number }> {
+    if (origin.actor !== "user") throw new Error("Approved audits require a user actor");
+    this.checkOrigin(origin);
+    if (!Array.isArray(changes) || changes.length < 1 || changes.length > snapshot.lessons.length) throw new Error("Invalid audit batch size");
+    const seen = new Set<number>();
+    for (const change of changes) {
+      if (!change || !Number.isSafeInteger(change.id) || change.id < 1 || seen.has(change.id)) throw new Error("Invalid or duplicate audit target");
+      seen.add(change.id);
+      checkedText(change.reason, "reason", 600);
+      if (change.action === "archive" || change.action === "move_global") {
+        if (Object.keys(change).some((key) => !["id", "reason", "action"].includes(key))) throw new Error("Invalid audit change fields");
+      } else if (change.action === "set_priority") {
+        checkedPriority(change.priority, 1);
+        if (Object.keys(change).some((key) => !["id", "reason", "action", "priority"].includes(key))) throw new Error("Invalid audit change fields");
+      } else throw new Error("Invalid audit action");
+    }
+    return this.transaction(() => {
+      const indexed = new Map(snapshot.lessons.map((item) => [item.id, item]));
+      const rows = new Map<number, Lesson>();
+      for (const change of changes) {
+        const expected = indexed.get(change.id);
+        if (!expected) throw new Error("Audit target is outside snapshot");
+        const currentRow = this.db.prepare("SELECT * FROM lessons WHERE id = ?").get(expected.id);
+        if (!currentRow) throw new Error("Audit snapshot is stale");
+        const current = lesson(currentRow);
+        const activity = this.db.prepare("SELECT max(id) AS id FROM activity WHERE lesson_id = ?").get(expected.id)!;
+        if (current.archived || current.scope !== expected.scope || current.priority !== expected.priority || Number(activity.id) !== expected.activity_id) throw new Error("Audit snapshot is stale");
+        if (current.priority === 0) throw new Error("Priority 0 lessons cannot be changed in an audit");
+        if (change.action === "set_priority" && current.priority === change.priority) throw new Error("Priority is unchanged");
+        if (change.action === "move_global" && current.scope === GLOBAL_SCOPE) throw new Error("Lesson is already global");
+        rows.set(change.id, current);
+      }
+      return changes.map((change) => {
+        const current = rows.get(change.id)!;
+        const scopedOrigin = { ...origin, reason: change.reason };
+        if (change.action === "archive") {
+          const result = this.archiveInTransaction(current.scope, current.id, scopedOrigin);
+          return { action: change.action, from: current.scope, lesson: result.lesson };
+        }
+        if (change.action === "set_priority") {
+          return { action: change.action, from: current.scope, lesson: this.setPriorityInTransaction(current.scope, current.id, change.priority, scopedOrigin) };
+        }
+        const moved = this.moveLessonInTransaction(current.scope, current.id, GLOBAL_SCOPE, scopedOrigin);
+        return { action: change.action, from: current.scope, lesson: this.get(GLOBAL_SCOPE, current.id), moved };
+      });
+    });
   }
 
   /** Creations and their linked predecessor archives remain attributable after reload. */
@@ -559,14 +623,16 @@ export class MemoryStore {
   }
 
   archive(scope: string, id: number, origin: Origin = UNKNOWN_ORIGIN): { lesson: Lesson; changed: boolean } {
-    return this.transaction(() => {
-      const current = this.get(scope, id);
-      if (current.archived) return { lesson: current, changed: false };
-      const now = Math.max(Date.now(), current.created_at, current.updated_at);
-      this.retire(scope, current.id, now);
-      this.log(current.id, "archive", origin, { before: "active", after: "archived" }, now);
-      return { lesson: this.get(scope, current.id), changed: true };
-    });
+    return this.transaction(() => this.archiveInTransaction(scope, id, origin));
+  }
+
+  private archiveInTransaction(scope: string, id: number, origin: Origin): { lesson: Lesson; changed: boolean } {
+    const current = this.get(scope, id);
+    if (current.archived) return { lesson: current, changed: false };
+    const now = Math.max(Date.now(), current.created_at, current.updated_at);
+    this.retire(scope, current.id, now);
+    this.log(current.id, "archive", origin, { before: "active", after: "archived" }, now);
+    return { lesson: this.get(scope, current.id), changed: true };
   }
 
   private retire(scope: string, id: number, now: number): void {

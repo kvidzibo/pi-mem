@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -218,4 +219,111 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     await client.stop();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("real offline audit tool asks once and applies all scopes only after RPC approval", { timeout: 30000 }, async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-mem-audit-rpc-")));
+  const project = join(directory, "project"), other = join(directory, "other");
+  mkdirSync(project); mkdirSync(other);
+  const database = join(directory, "lessons.sqlite3");
+  const store = new MemoryStore(database);
+  const source = { harness: "test", session: null, actor: "user" as const };
+  const add = (scope: string, text: string) => store.add(scope, { text, evidence: "Verified", basis: "user_request" }, source).lesson;
+  const archived = add(project, "Audit archive");
+  const ranked = add(GLOBAL_SCOPE, "Audit ranking");
+  const moved = add(other, "Audit shared guidance");
+  // Deterministic in-process provider: exercise Pi's real schema/execute pipeline, never call a network or live model.
+  const provider = join(directory, "provider.ts");
+  writeFileSync(provider, `import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+export default function(pi) {
+  const seen = new Set(); let round = 0;
+  pi.registerProvider("audit-test", { api: "audit-test-api", baseUrl: "https://example.invalid", apiKey: "test-only",
+    models: [{ id: "audit", name: "Offline audit", reasoning: false, input: ["text"],
+      contextWindow: 200000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    streamSimple(model, context) {
+      const stream = createAssistantMessageEventStream();
+      const text = context.messages.map(m => typeof m.content === "string" ? m.content :
+        (Array.isArray(m.content) ? m.content.filter(p => p.type === "text").map(p => p.text).join("\\n") : ""))
+        .filter(s => s.includes("with auditId")).at(-1) || "";
+      const token = /with auditId ("[^"]+")/.exec(text);
+      const auditId = token ? JSON.parse(token[1]) : undefined;
+      const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
+        timestamp: Date.now(), content: [], stopReason: "pending", usage: { input: 0, output: 0, cacheRead: 0,
+          cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      stream.push({ type: "start", partial: message });
+      if (auditId && !seen.has(auditId)) {
+        seen.add(auditId); round++;
+        const changes = round === 1 ? [
+          { id: ${archived.id}, action: "archive", reason: "Low value" },
+          { id: ${ranked.id}, action: "set_priority", priority: 3, reason: "Recurring failures" },
+          { id: ${moved.id}, action: "move_global", reason: "Cross-project guidance" }
+        ] : [{ id: ${ranked.id}, action: "set_priority", priority: round === 2 ? 4 : true, reason: "Review priority" }];
+        const call = { type: "toolCall", id: "audit-call-" + round, name: "memory_audit", arguments: { auditId, changes } };
+        message.content.push(call);
+        stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+        stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(call.arguments), partial: message });
+        stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: message });
+        message.stopReason = "toolUse";
+      } else {
+        message.content.push({ type: "text", text: "Audit finished." }); message.stopReason = "stop";
+        stream.push({ type: "text_start", contentIndex: 0, partial: message });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: "Audit finished.", partial: message });
+        stream.push({ type: "text_end", contentIndex: 0, content: "Audit finished.", partial: message });
+      }
+      stream.push({ type: "done", reason: message.stopReason, message }); stream.end(); return stream;
+    }
+  });
+}
+`);
+  const { RpcClient } = await import(pathToFileURL(join(DIST, "modes/rpc/rpc-client.js")).href);
+  const client = new RpcClient({ cliPath: join(DIST, "bundle/cli.js"), cwd: project, provider: "audit-test", model: "audit",
+    env: { ...Object.fromEntries(Object.keys(process.env).map((key) => [key, ""])), PATH: process.env.PATH ?? "",
+      HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_MEMORY_DB: database,
+      PI_OFFLINE: "1", PI_TELEMETRY: "0" },
+    args: ["--offline", "--no-approve", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-extensions",
+      "-e", join(ROOT, "src/index.ts"), "-e", provider] });
+  const events: any[] = [];
+  let choice = "Apply all";
+  let ended: (() => void) | undefined;
+  client.onEvent((event: any) => {
+    events.push(event);
+    if (event.type === "agent_end") ended?.();
+    if (event.type === "extension_ui_request" && event.method === "select") {
+      assert.match(event.title, /^Review memory audit/);
+      assert.deepEqual(event.options, ["Cancel", "Apply all"]);
+      assert.match(event.title, /cannot be restored/);
+      client.process.stdin.write(JSON.stringify({ type: "extension_ui_response", id: event.id, value: choice }) + "\n");
+    }
+  });
+  const audit = async () => {
+    const start = events.length;
+    const finished = new Promise<void>((resolve) => { ended = resolve; });
+    await client.prompt("/pi-mem audit --all-projects");
+    await finished;
+    return events.slice(start);
+  };
+  try {
+    await client.start();
+    const approved = await audit();
+    const review = approved.find((event) => event.method === "select");
+    assert.match(review.title, /3 changes: 1 archives · 1 priority changes · 1 moves to global/);
+    assert.ok(review.title.includes(other));
+    assert.match(review.title, /Cross-project guidance/);
+    assert.equal(store.get(project, archived.id).archived, true);
+    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
+    assert.equal(store.get(GLOBAL_SCOPE, moved.id).scope, GLOBAL_SCOPE);
+    const history = store.history(GLOBAL_SCOPE, moved.id).events[0];
+    assert.equal(history.actor, "user"); assert.equal(history.provider, "audit-test"); assert.equal(history.model, "audit");
+    assert.ok(approved.some((event) => event.type === "tool_execution_end" && !event.isError && event.result.details.status === "applied"));
+    choice = "Cancel";
+    const declined = await audit();
+    assert.equal(declined.filter((event) => event.method === "select").length, 1);
+    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
+    assert.ok(declined.some((event) => event.type === "tool_execution_end" && event.result.details.status === "cancelled"));
+    const invalid = await audit();
+    assert.equal(invalid.filter((event) => event.method === "select").length, 0, "boolean priorities must fail before schema coercion and approval");
+    assert.ok(invalid.some((event) => event.type === "tool_execution_end" && event.isError && /priority must/.test(JSON.stringify(event.result))));
+    assert.equal(store.get(GLOBAL_SCOPE, ranked.id).priority, 3);
+    assert.ok(!events.some((event) => event.type === "extension_error"), client.getStderr());
+  } finally { await client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
