@@ -27,7 +27,9 @@ The agent's `memory` tool exposes only:
 - **`archive`** — supply `id` to exclude that record from future recall while retaining its content and provenance.
 - **`set_priority`** — supply an active lesson's `id` and `priority` **1–10**. Content and ID stay unchanged; models cannot reprioritize priority-0 lessons.
 
-For **add**, the agent chooses `scope: "global"` for cross-project lessons or unrelated CLI usage; otherwise `scope: "project"` (the default). No separate user request is needed for global scope. ID-based actions retain the lesson's scope and can target only current-project or global lessons; omit `scope` for these actions. Duplicate detection is scope-local.
+Agent submissions do not accept a scope. The originating project is captured automatically; evaluation proposes project or global promotion based on the evidence and configured thresholds, and the user approves it. ID-based actions retain the active lesson's scope and can target only current-project or global lessons. Pending candidate identity is project + normalized wording; active duplicate detection remains scope-local.
+
+All three agent-exposed tools and their input/output interfaces are documented in [Agent tools](docs/agent-tools.md). Runtime JSON schemas are defined by `pi.registerTool` in [`src/index.ts`](src/index.ts).
 
 Every tool action accepts an optional `reason` (up to 600 characters), retained in candidate provenance or the active lesson's activity log.
 

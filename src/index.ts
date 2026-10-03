@@ -398,10 +398,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory",
     label: "Memory",
-    description: "Stage new project or global lessons as session-local candidates; only user-approved promotions become shared memory. " +
+    description: "Stage new lessons as session-local candidates; evaluation chooses project or global scope and only user-approved promotions become shared memory. " +
       "Candidates are provisional and recalled only to their originating session. Similar candidates are evaluated through /pi-mem evaluate, not exposed to submitting agents. " +
       "Active lessons are recalled automatically; no on-demand reads. " +
-      "Choose global scope for cross-project lessons or unrelated CLI usage; otherwise use project (default). " +
       "ID-based actions retain scope and target only current-project or global lessons. " +
       "add/supersede require text, evidence, and basis: validated_learning for verified discoveries, validated_fix for corrections, " +
       "or user_request for explicit memory requests. Evidence describes the verification or explicit memory request. " +
@@ -418,9 +417,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
     promptSnippet: "Stage memory candidates, or supersede, archive, or reprioritize active lessons",
     parameters: Type.Object({
       action: StringEnum(ACTIONS),
-      scope: Type.Optional(StringEnum(["project", "global"] as const, {
-        description: "Scope for add only; defaults to project. ID-based actions retain the existing scope.",
-      })),
       id: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
         description: "Stable lesson number from the #id suffix." })),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TEXT })),
@@ -429,10 +425,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       basis: Type.Optional(StringEnum(["validated_learning", "validated_fix", "user_request"] as const)),
       priority: Type.Optional(Type.Integer({ minimum: 1, maximum: 10,
         description: "Required for add/set_priority; optional for supersede. 1 = highest priority, 10 = lowest. Zero is user-only." })),
-    }),
+    }, { additionalProperties: false }),
     prepareArguments(args) {
-      // Reject coercible values before Pi's schema validation (e.g. true becoming 1).
+      // Reject scope hints and coercible values before Pi schema validation.
       if (args && typeof args === "object") {
+        if ("scope" in args) throw new Error("memory does not accept scope; evaluation decides promotion scope");
         if ("priority" in args) checkedPriority(args.priority, 1);
         if ("id" in args && args.id != null) return { ...args, id: parseLessonId(args.id) } as MemoryRequest;
       }
@@ -445,14 +442,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (!ctx.sessionManager.getSessionFile() && params.basis !== "user_request") {
         throw new Error("Ephemeral sessions require an explicit user memory request for persistent writes");
       }
+      if ("scope" in params) throw new Error("memory does not accept scope; evaluation decides promotion scope");
       let result;
       if (params.action === "add") {
-        if (params.scope !== undefined && params.scope !== "project" && params.scope !== "global") throw new Error("scope must be project or global");
         if (params.basis !== "validated_learning" && params.basis !== "validated_fix" && params.basis !== "user_request") {
           throw new Error("add requires basis: validated_learning, validated_fix, or user_request");
         }
         checkedPriority(params.priority, 1);
-        store.stageCandidate(scope, params.scope ?? "project", { text: params.text!, evidence: params.evidence!,
+        store.stageCandidate(scope, { text: params.text!, evidence: params.evidence!,
           basis: params.basis, priority: params.priority }, { ...origin(ctx, _id), reason: params.reason }, independenceKey(ctx));
         result = { status: "candidate staged", message: "Provisional for this session only; evaluate candidates and approve promotion to share it." };
       } else result = recordWrite(runMemory(store, scope, params, origin(ctx, _id)), ctx);

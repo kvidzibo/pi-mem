@@ -9,7 +9,7 @@ export interface CandidateObservation {
   origin: Origin; created_at: number; independenceKey: string; exposed: boolean;
 }
 export interface Candidate {
-  id: number; project: string; requestedScope: "project" | "global"; text: string; evidence: string;
+  id: number; project: string; text: string; evidence: string;
   priority: number; basis: NewLesson["basis"]; created_at: number; observations: CandidateObservation[];
 }
 export interface CandidateGroup {
@@ -59,14 +59,14 @@ export class CandidateStore {
       INSERT OR IGNORE INTO candidate_state VALUES ('evaluation_highwater', 0), ('marker', 0);
       CREATE TABLE IF NOT EXISTS candidates (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
-        project TEXT NOT NULL, requested_scope TEXT NOT NULL CHECK(requested_scope IN ('project', 'global')),
+        project TEXT NOT NULL,
         text TEXT NOT NULL, text_key TEXT NOT NULL, evidence TEXT NOT NULL,
         priority INTEGER NOT NULL CHECK(priority BETWEEN 1 AND 10),
         basis TEXT NOT NULL CHECK(basis IN ('validated_learning', 'validated_fix', 'user_request')),
         created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'promoted')),
         lesson_id INTEGER REFERENCES lessons(id), CHECK((status = 'pending') = (lesson_id IS NULL))
       ) WITHOUT ROWID;
-      CREATE UNIQUE INDEX IF NOT EXISTS candidate_pending_identity ON candidates(project, requested_scope, text_key) WHERE status = 'pending';
+      CREATE UNIQUE INDEX IF NOT EXISTS candidate_pending_identity ON candidates(project, text_key) WHERE status = 'pending';
       CREATE INDEX IF NOT EXISTS candidate_text_identity ON candidates(text_key, id);
       CREATE TABLE IF NOT EXISTS candidate_observations (
         id INTEGER PRIMARY KEY CHECK(typeof(id) = 'integer' AND id BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}),
@@ -100,7 +100,7 @@ export class CandidateStore {
         FOREIGN KEY(evaluation_id, group_index) REFERENCES candidate_evaluation_groups(evaluation_id, group_index)
       ) WITHOUT ROWID;
       CREATE TRIGGER IF NOT EXISTS candidates_immutable BEFORE UPDATE OF
-        id, project, requested_scope, text, text_key, evidence, priority, basis, created_at ON candidates
+        id, project, text, text_key, evidence, priority, basis, created_at ON candidates
         BEGIN SELECT RAISE(ABORT, 'Candidate content is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS candidates_promotion_only BEFORE UPDATE OF status, lesson_id ON candidates
         WHEN OLD.status != 'pending' OR NEW.status != 'promoted' OR NEW.lesson_id IS NULL
@@ -109,7 +109,7 @@ export class CandidateStore {
         BEGIN SELECT RAISE(ABORT, 'Candidates cannot be deleted'); END;
       CREATE TRIGGER IF NOT EXISTS candidates_no_replace BEFORE INSERT ON candidates
         WHEN EXISTS (SELECT 1 FROM candidates WHERE id = NEW.id) OR
-          (NEW.status = 'pending' AND EXISTS (SELECT 1 FROM candidates WHERE project = NEW.project AND requested_scope = NEW.requested_scope AND text_key = NEW.text_key AND status = 'pending'))
+          (NEW.status = 'pending' AND EXISTS (SELECT 1 FROM candidates WHERE project = NEW.project AND text_key = NEW.text_key AND status = 'pending'))
         BEGIN SELECT RAISE(ABORT, 'Candidates cannot be replaced'); END;
     `);
     const immutableTables = {
@@ -131,22 +131,21 @@ export class CandidateStore {
     this.db.exec("PRAGMA user_version = 8;");
   }
 
-  stage(project: string, requestedScope: "project" | "global", input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
+  stage(project: string, input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
     if (!isAbsolute(project) || project.includes("\0")) throw new Error("Project must be an absolute path");
-    if (requestedScope !== "project" && requestedScope !== "global") throw new Error("Invalid requested scope");
     checkedPriority(input.priority ?? 5, 1);
     const checked = checkNew(input, this.limits);
     if (checked.basis === "import") throw new Error("Imports do not create agent candidates");
     this.checkOrigin(origin);
     checkedText(independenceKey, "independence key", 300);
     this.transaction(() => {
-      const existing = this.db.prepare("SELECT id FROM candidates WHERE project = ? AND requested_scope = ? AND text_key = ? AND status = 'pending'")
-        .get(project, requestedScope, textHash(checked.text));
+      const existing = this.db.prepare("SELECT id FROM candidates WHERE project = ? AND text_key = ? AND status = 'pending'")
+        .get(project, textHash(checked.text));
       const id = existing ? Number(existing.id) : nextId(this.db, "candidates");
       const now = Date.now();
       if (!existing) this.db.prepare(`INSERT INTO candidates
-        (id, project, requested_scope, text, text_key, evidence, priority, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, project, requestedScope, checked.text, textHash(checked.text), checked.evidence, checked.priority ?? 5, checked.basis, now);
+        (id, project, text, text_key, evidence, priority, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, project, checked.text, textHash(checked.text), checked.evidence, checked.priority ?? 5, checked.basis, now);
       const owner = json([origin.harness, origin.session ?? independenceKey]);
       if (this.db.prepare("SELECT 1 FROM candidate_observations WHERE candidate_id = ? AND owner_key = ?").get(id, owner)) return;
       this.db.prepare(`INSERT INTO candidate_observations
@@ -176,7 +175,7 @@ export class CandidateStore {
         ${session === undefined ? "" : "AND json_extract(o.origin, '$.session') = ?"} ORDER BY o.id`)
         .all(...(session === undefined ? [Number(row.id)] : [Number(row.id), session])).map((observation) => this.observation(observation));
       const own = session === undefined ? undefined : observations[0];
-      return { id: Number(row.id), project: String(row.project), requestedScope: row.requested_scope as Candidate["requestedScope"],
+      return { id: Number(row.id), project: String(row.project),
         text: own?.wording ?? String(row.text), evidence: own?.evidence ?? String(row.evidence),
         priority: own?.priority ?? Number(row.priority), basis: own?.basis ?? row.basis as NewLesson["basis"],
         created_at: own?.created_at ?? Number(row.created_at), observations };

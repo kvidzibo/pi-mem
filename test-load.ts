@@ -337,6 +337,11 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     extension.runtime.sendMessage = (message: { customType: string; content: string }) => { sent.push(message); };
     await (async () => { for (const handler of extension.handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx); })();
     const tool = extension.tools.get("memory").definition;
+    assert.equal("scope" in tool.parameters.properties, false, "submitting agents must not choose promotion scope");
+    assert.equal(tool.parameters.additionalProperties, false);
+    for (const scope of ["project", "global"]) assert.throws(() => tool.prepareArguments({ action: "add", scope,
+      text: "Build assets before packaging.", evidence: "Reproduced with the integration fixture.", basis: "validated_learning", priority: 6 }),
+      /evaluation decides promotion scope/);
     const execute = async (text: string, session = "candidate-session") => {
       ctx.sessionManager.getSessionId = () => session;
       return tool.execute("candidate-call", tool.prepareArguments({ action: "add", text, evidence: "Reproduced with the integration fixture.",
@@ -357,6 +362,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     assert.equal(store.ownCandidates(ctx.cwd, "another-session").length, 0, "candidate recall is isolated to its issuing session");
     const candidate = snapshot.candidates[0];
     assert.equal(candidate.text, "Build assets before packaging.");
+    assert.equal("requestedScope" in candidate, false, "candidate exports must not retain submission scope preferences");
     assert.equal(candidate.basis, "validated_learning");
     assert.equal(candidate.observations[0].origin.provider, "candidate-provider");
     assert.equal(candidate.observations[0].origin.model, "candidate-model");
@@ -381,6 +387,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     assert.equal(sent.length, 1);
     assert.equal(sent[0].customType, "pi-mem-evaluation");
     assert.match(sent[0].content, /Build assets before packaging/);
+    assert.doesNotMatch(sent[0].content, /requestedScope|requested_scope/);
     assert.match(sent[0].content, /Cache-safe independent observation/);
     const evaluationId = JSON.parse(/evaluationId ("[^"]+")/.exec(sent[0].content)![1]);
     const evaluator = extension.tools.get("memory_evaluate").definition;
@@ -415,7 +422,7 @@ test("real Pi loader: model additions stage session candidates and evaluation ex
     assert.deepEqual(store.candidateCounts(), { pending: 3, sinceEvaluation: 1 });
     for (const handler of extension.handlers.get("before_agent_start") ?? []) await handler({ systemPrompt: "Base" }, ctx);
     const foreign = join(directory, "other-project"); mkdirSync(foreign);
-    for (const session of ["foreign-a", "foreign-b"]) store.stageCandidate(foreign, "project",
+    for (const session of ["foreign-a", "foreign-b"]) store.stageCandidate(foreign,
       { text: "Verify the foreign project's build configuration.", evidence: "Verified an independent build.", basis: "validated_fix", priority: 5 },
       { harness: "test", session, actor: "model" }, session);
     await extension.commands.get("pi-mem").handler("evaluate", ctx);

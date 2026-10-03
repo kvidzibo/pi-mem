@@ -49,8 +49,8 @@ test("global lessons follow sessions across projects without exposing other proj
     store = new MemoryStore(process.env.PI_MEMORY_DB);
     const hidden = store.add(other, { text: "Other project secret.", evidence: "Verified.", basis: "user_request" }, { harness: "test", session: null }).lesson;
     await assert.rejects(execute({ action: "archive", id: hidden.id }), /not found/);
-    await assert.rejects(execute({ ...input, scope: "/arbitrary" }), /scope must/);
-    await assert.rejects(execute({ action: "archive", id: global.id, scope: "project" }), /only supported for add/);
+    await assert.rejects(execute({ ...input, scope: "/arbitrary" }), /does not accept scope/);
+    await assert.rejects(execute({ action: "archive", id: global.id, scope: "project" }), /does not accept scope/);
     let recall = (await event("context", { messages: [] })).messages[0].content;
     assert.match(recall, /^GLOBAL LESSONS/);
     assert.match(recall, new RegExp(`#${global.id}\\n\\nPROJECT LESSONS`));

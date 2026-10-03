@@ -373,8 +373,8 @@ export class MemoryStore {
     return this.get(scope, id);
   }
 
-  stageCandidate(project: string, requestedScope: "project" | "global", input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
-    return this.candidatesStore.stage(project, requestedScope, input, origin, independenceKey);
+  stageCandidate(project: string, input: NewLesson, origin: Origin, independenceKey: string): { accepted: true } {
+    return this.candidatesStore.stage(project, input, origin, independenceKey);
   }
   ownCandidates(project: string, session: string): Candidate[] { return this.candidatesStore.own(project, session); }
   candidateCounts(): { pending: number; sinceEvaluation: number } { return this.candidatesStore.counts(); }

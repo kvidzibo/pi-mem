@@ -346,7 +346,7 @@ test("real offline candidate tools preserve blind submissions and require indivi
   const project = join(directory, "project"); mkdirSync(project);
   const database = join(directory, "lessons.sqlite3");
   const store = new MemoryStore(database);
-  store.stageCandidate(project, "project", { text: "Back up SQLite before schema migrations.", evidence: "Verified recovery from a database snapshot.",
+  store.stageCandidate(project, { text: "Back up SQLite before schema migrations.", evidence: "Verified recovery from a database snapshot.",
     basis: "validated_fix", priority: 2 }, { harness: "test", session: "independent-peer", actor: "model" }, "independent-peer");
   const provider = join(directory, "provider.ts");
   writeFileSync(provider, `import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
@@ -375,7 +375,7 @@ export default function(pi) {
           reason: "Equivalent database precaution verified independently.", recommend: true }] } };
       } else if (!discovered && texts.some(s => s.includes("Record the independently verified migration precaution."))) {
         discovered = true;
-        call = { type: "toolCall", id: "candidate-discovery", name: "memory", arguments: { action: "add", scope: "project",
+        call = { type: "toolCall", id: "candidate-discovery", name: "memory", arguments: { action: "add",
           text: "Snapshot SQLite before applying migrations.", evidence: "Verified restoring the database after migration failure.",
           basis: "validated_fix", priority: 2 } };
       }

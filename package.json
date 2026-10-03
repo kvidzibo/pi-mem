@@ -23,6 +23,7 @@
     "index.ts",
     "src",
     "README.md",
+    "docs",
     "LICENSE"
   ],
   "engines": {
