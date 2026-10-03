@@ -79,7 +79,7 @@ test("real Pi loader: immediate persistence, bounded recall snapshots, lifecycle
     const tool = extension.tools.get("memory").definition;
     assert.deepEqual(tool.parameters.properties.action.enum, ["add", "supersede", "archive", "set_priority"]);
     assert.equal(tool.parameters.properties.id.type, "integer");
-    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "scope", "text"]);
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["action", "basis", "evidence", "id", "priority", "reason", "text"]);
     inspection = new MemoryStore(process.env.PI_MEMORY_DB);
     const execute = async (params: object, signal?: AbortSignal) => tool.execute("call", tool.prepareArguments(params), signal, undefined, ctx);
     const input = { action: "add", priority: 5, text: "Test startup recall.", evidence: "Verified in the lifecycle smoke test.", basis: "validated_fix" };
