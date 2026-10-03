@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
 import { formatTokens, memoryContext } from "./src/presentation.ts";
 import { buildAudit, stagedAudit } from "./src/audit.ts";
+import { Backups } from "./src/backups.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -416,6 +417,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
   const notices: string[] = [];
   const messages: Array<{ content: string; customType?: string }> = [];
   const dispatchOptions: unknown[] = [];
+  const widgets: Array<string[] | undefined> = [];
   type Step = { title: string; choice?: string; text?: string; search?: string; beforeSearch?: RegExp; backspaces?: number; submit?: boolean; match?: RegExp; absent?: RegExp; before?: () => void | Promise<void> };
   const steps: Step[] = [];
   const inputs: string[] = [];
@@ -432,6 +434,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
     modelRegistry: { complete: () => { throw new Error("Menu browsing must not call a model"); } },
     ui: {
       notify: (text: string) => notices.push(text), setStatus() {},
+      setWidget: (_key: string, lines?: string[]) => widgets.push(lines),
       input: async () => { assert.ok(inputs.length, "unexpected input"); return inputs.shift(); },
       custom: async (factory: any) => {
         const step = steps.shift();
@@ -467,7 +470,7 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
             component.handleInput("\x01"); // Start of prefilled lesson.
             component.handleInput("\x0b"); // Clear the line without changing the main Pi editor.
             component.handleInput(`\x1b[200~${step.text}\x1b[201~`);
-            if (!step.title.startsWith("New cwd")) assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
+            if (!step.title.startsWith("New cwd") && !step.title.startsWith("Backup folder")) assert.match(screen(), new RegExp(`${step.text.split(/\s+/u).length}/5 words`));
           }
           const full = screen();
           tui.terminal.rows = 12;
@@ -490,8 +493,8 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       },
     },
   };
-  const event = async (name: string) => {
-    for (const handler of extension?.handlers.get(name) ?? []) await handler({}, ctx);
+  const event = async (name: string, value: object = {}) => {
+    for (const handler of extension?.handlers.get(name) ?? []) await handler(value, ctx);
   };
   try {
     extension = await load();
@@ -512,6 +515,44 @@ test("memory menu browses privately, confirms retained writes, and cancels stale
       assert.equal(steps.length, 0, `unreached menu steps; notices: ${notices.join("\n\n")}`);
       assert.equal(inputs.length, 0);
     };
+    const backupDirectory = join(directory, "selected-backups");
+    mkdirSync(backupDirectory);
+    steps.push(
+      { title: "Memory ·", choice: "Backups…" },
+      { title: "Backups", choice: "Backup statistics", match: /Auto backup: off/ },
+      { title: "Backup statistics", choice: "Back", match: /Total folder size: 0 B[\s\S]*Last successful backup: never/ },
+      { title: "Backups", choice: "Auto backup…" },
+      { title: "Auto backup", choice: "Daily" },
+      { title: "Backups", choice: "Backup folder…", match: /Auto backup: daily/ },
+      { title: "Backup folder — existing directory", text: backupDirectory },
+      { title: "Change backup folder?", choice: "Use this folder", match: /Existing backups stay where they are/ },
+      { title: "Backups", choice: "Back up now", match: /selected-backups/ },
+      { title: "Backup created", choice: "Back", match: /Memory backup created:[\s\S]*1002 lessons \(1002 active, 0 archived\)[\s\S]*Backup folder total:/ },
+      { title: "Backups", choice: "Backup statistics" },
+      { title: "Backup statistics", choice: "Back", match: /Backup files in folder: 1[\s\S]*Last successful backup:/ },
+      { title: "Backups", choice: "Back" },
+      { title: "Memory ·" },
+    );
+    await run();
+    const backups = new Backups(process.env.PI_MEMORY_DB);
+    assert.deepEqual(backups.settings(), { frequency: "daily", folder: backupDirectory });
+    assert.equal(backups.stats().files, 1);
+    // Select an empty folder so startup is due without changing the clock.
+    const startupDirectory = join(directory, "startup-backups");
+    mkdirSync(startupDirectory);
+    backups.configure({ folder: startupDirectory });
+    await event("session_start", { reason: "startup" });
+    assert.match(widgets.at(-1)!.join("\n"), /Memory backup created:[\s\S]*1002 lessons[\s\S]*Backup folder total:/);
+    const startupWidget = widgets.at(-1);
+    await event("session_shutdown", { reason: "reload" });
+    await event("session_start", { reason: "reload" });
+    assert.deepEqual(widgets.at(-1), startupWidget, "startup report survives reload");
+    await event("input");
+    assert.equal(widgets.at(-1), undefined);
+    await event("session_start", { reason: "reload" });
+    assert.equal(widgets.at(-1), undefined, "dismissed reports must not reappear on reload");
+    assert.equal(backups.stats().files, 1);
+    assert.equal(messages.length, 0, "backup reports must not steer the model");
     steps.push(
       { title: "Memory ·", choice: "Browse / search lessons", match: /1002 active · 1 loaded/ },
       { title: "Browse / search", choice: "Not recalled only", match: /lesson-count limit reached \(1 lesson\)/ },

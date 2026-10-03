@@ -5,6 +5,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { memoryConfig } from "./config.ts";
+import { Backups, backupReport } from "./backups.ts";
 import { auditChanges, auditReview, buildAudit, stagedAudit, writeAudit } from "./audit.ts";
 import { menuChoice } from "./menu-ui.ts";
 import { memoryMenu, type MenuState } from "./menu.ts";
@@ -18,6 +19,7 @@ type SavedLesson = Pick<Lesson, "id" | "text" | "supersedes_id">;
 type ArchivedLesson = Pick<Lesson, "id" | "text" | "scope"> & { session: string; database: string };
 const SAVED_TYPE = "pi-mem-saved";
 const ARCHIVED_TYPE = "pi-mem-archived";
+const BACKUP_TYPE = "pi-mem-backup-report";
 const COMMANDS = ["global", "list", "search", "get", "history", "add", "supersede", "priority", "move", "archive", "archived", "audit", "reload", "help"];
 const HELP = [
   "/pi-mem — open the memory menu (text status without UI)",
@@ -40,6 +42,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let generation = 0;
   let auditController: AbortController | undefined;
   let auditTurnBlocked = false;
+  let backupShown = false;
   let pendingAudit: { id: string; snapshot: AuditSnapshot; state: MenuState; generation: number; session: string; cwd: string; anchor: string | null } | undefined;
   const recallContext = new RecallContext();
 
@@ -247,16 +250,55 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   }
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     recallContext.reset();
     reset();
     recall(ctx);
+    backupShown = false;
+    if (event.reason === "reload" && ctx.hasUI) {
+      const entry = ctx.sessionManager.getBranch().slice().reverse().find((entry) => entry.type === "custom" && entry.customType === BACKUP_TYPE);
+      const report = entry?.type === "custom" ? (entry.data as { text?: string | null })?.text : undefined;
+      if (report) ctx.ui.setWidget("pi-mem-backup", report.split("\n"));
+      backupShown = !!report;
+    }
+    if (event.reason !== "startup" || failed) return;
+    const started = generation;
+    const session = ctx.sessionManager.getSessionId();
+    let report: string;
+    try {
+      const manager = new Backups(current(ctx).path);
+      const info = await manager.create(true);
+      if (!info) return;
+      let total: number | undefined;
+      try { total = manager.stats().bytes; } catch { /* Do not misreport a successful backup as failed. */ }
+      report = backupReport(info, total);
+    } catch (error) {
+      report = `Memory backup failed: ${visible(clipped(error instanceof Error ? error.message : String(error), 700))}. Will retry at next startup.`;
+    }
+    if (generation !== started || ctx.sessionManager.getSessionId() !== session) return;
+    // Widgets survive startup rendering; custom entries preserve the report across /reload without model context.
+    pi.appendEntry(BACKUP_TYPE, { text: report });
+    if (ctx.hasUI) {
+      ctx.ui.setWidget("pi-mem-backup", report.split("\n"));
+      backupShown = true;
+    }
+  });
+
+  pi.on("input", (_event, ctx) => {
+    if (backupShown) {
+      ctx.ui.setWidget("pi-mem-backup", undefined);
+      pi.appendEntry(BACKUP_TYPE, { text: null });
+      backupShown = false;
+    }
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     recallContext.reset();
     reset();
-    if (ctx.hasUI) ctx.ui.setStatus("pi-mem", undefined);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("pi-mem", undefined);
+      if (backupShown) ctx.ui.setWidget("pi-mem-backup", undefined);
+    }
   });
 
   pi.on("before_agent_start", (event, ctx) => {

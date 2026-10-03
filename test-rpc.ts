@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { GLOBAL_SCOPE, MemoryStore } from "./src/store.ts";
+import { Backups } from "./src/backups.ts";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -12,7 +13,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const DIST = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 type Event = { type: string; id?: string; method?: string; message?: string; notifyType?: string;
   title?: string; prefill?: string; options?: string[]; statusKey?: string; statusText?: string;
-  entry?: { customType: string; data: unknown } };
+  entry?: { customType: string; data: unknown }; widgetKey?: string; widgetLines?: string[] };
 
 test("real offline Pi processes save, reload across sessions, and isolate projects without model calls", { timeout: 90000 }, async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-mem-rpc-")));
@@ -74,7 +75,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
           return;
         }
         browseRootSeen = true;
-        assert.equal(event.options?.length, 10);
+        assert.equal(event.options?.length, 11);
         assert.deepEqual(event.options?.slice(0, 3), ["Browse / search lessons", "Add lesson", "Archived lessons"]);
         value = "Browse / search lessons";
       } else if (browseMenu && event.title?.startsWith("Browse / search lessons")) {
@@ -181,9 +182,16 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     assert.match(memoryStatus(), /^ 🧠 1\|0 \(\+1 -1\) ~/);
     assert.equal(saveCards().length, 2);
     await client.stop();
+    const backups = new Backups(env.PI_MEMORY_DB);
+    backups.configure({ frequency: "daily" });
+    const startupReports = events.length;
     client = new RpcClient({ ...options, cwd: project });
     listen();
     await client.start();
+    await client.getState(); // RPC client.start only delays 100ms; a correlated command waits for initialization.
+    const widget = events.slice(startupReports).find((event) => event.method === "setWidget" && event.widgetKey === "pi-mem-backup" && event.widgetLines);
+    assert.match(widget?.widgetLines?.join("\n") ?? "", /Memory backup created:[\s\S]*2 lessons \(1 active, 1 archived\)[\s\S]*Backup folder total:/);
+    assert.equal(backups.stats().files, 1);
     assert.match(await command("/pi-mem reload"), /A verified lesson from the RPC smoke test/);
     assert.equal(JSON.parse(await command("/pi-mem list")).total, 1);
     assert.equal(JSON.parse(await command(`/pi-mem archive ${replacement.id}`)).changed, true);
@@ -210,7 +218,7 @@ test("real offline Pi processes save, reload across sessions, and isolate projec
     const emptyMenu = events.find((event) => event.method === "select" && event.title?.startsWith("Memory · other"));
     assert.ok(emptyMenu);
     assert.match(emptyMenu!.title!, /0 active · 0 loaded into context/);
-    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Global lessons", "All projects", "Audit…", "Move memory", "Status & limits", "Reload memory", "Help"]);
+    assert.deepEqual(emptyMenu!.options, ["Browse / search lessons", "Add lesson", "Archived lessons", "Global lessons", "All projects", "Audit…", "Move memory", "Backups…", "Status & limits", "Reload memory", "Help"]);
     const recalled = await command("/pi-mem reload");
     assert.doesNotMatch(recalled, /A verified lesson from the RPC smoke test/);
     assert.match(recalled, /^Database: .+\nPROJECT LESSONS$/);

@@ -103,10 +103,11 @@ export async function menuChoice(ctx: ExtensionContext, title: string, body: str
 }
 
 /** Editable prefilled path in TUI; RPC input supports only placeholders, so blank keeps the default. */
-export async function destinationInput(ctx: ExtensionContext, initial: string, signal: AbortSignal): Promise<string | undefined> {
+export async function destinationInput(ctx: ExtensionContext, initial: string, signal: AbortSignal,
+  title = "New cwd — existing directory"): Promise<string | undefined> {
   signal.throwIfAborted();
   if (ctx.mode !== "tui") {
-    const value = await ctx.ui.input(`New cwd — existing directory; blank keeps ${visible(initial)}`, initial, { signal });
+    const value = await ctx.ui.input(`${title}; blank keeps ${visible(initial)}`, initial, { signal });
     signal.throwIfAborted();
     return value === "" ? initial : value;
   }
@@ -123,7 +124,7 @@ export async function destinationInput(ctx: ExtensionContext, initial: string, s
       get focused() { return input.focused; },
       set focused(value: boolean) { input.focused = value; },
       render(width: number) {
-        return [theme.fg("accent", "New cwd — existing directory"), ...input.render(width),
+        return [theme.fg("accent", title), ...input.render(width),
           theme.fg("dim", "Enter review · Escape cancel")].map((line) => truncateToWidth(line, width));
       },
       handleInput(data: string) {
